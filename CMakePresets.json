@@ -25,7 +25,8 @@
       },
       "architecture": { "value": "x64", "strategy": "external" },
       "environment": {
-        "VCPKG_DEFAULT_TRIPLET": "x64-windows"
+        "VCPKG_DEFAULT_TRIPLET": "x64-windows",
+        "VCPKG_VISUAL_STUDIO_PATH": "C:/Program Files/Microsoft Visual Studio/2022/Community"
       }
     },
     {
@@ -36,12 +37,14 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_COMPILER": "clang-cl",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL",
+        "CMAKE_MAP_IMPORTED_CONFIG_DEBUG": "Release",
         "CMAKE_CXX_FLAGS": "/Zc:__cplusplus /W4 /EHsc /fp:precise -fsanitize=address,undefined /D_DISABLE_VECTOR_ANNOTATION /D_DISABLE_STRING_ANNOTATION",
         "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/clang-cl-asan-linker-flags.cmake"
       },
       "architecture": { "value": "x64", "strategy": "external" },
       "environment": {
-        "VCPKG_DEFAULT_TRIPLET": "x64-windows"
+        "VCPKG_DEFAULT_TRIPLET": "x64-windows",
+        "VCPKG_VISUAL_STUDIO_PATH": "C:/Program Files/Microsoft Visual Studio/2022/Community"
       }
     }
   ],

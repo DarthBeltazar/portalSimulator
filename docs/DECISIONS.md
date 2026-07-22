@@ -99,3 +99,47 @@ the original spec (which assumes a Linux Clang/GCC target where these don't aris
 a 4-element array via a non-constant-folded index) compiled and run under this preset produced
 both a UBSan "index out of bounds" report and an ASan "stack-buffer-overflow" abort — the gate
 catches real bugs, not just links cleanly.
+
+## 0004 — Pinning vcpkg's own MSVC toolset (unrelated VS "18" install found on this machine)
+
+**Date:** 2026-07-22
+**Status:** accepted
+
+**Context.** This machine has a second, unexpected Visual Studio install —
+`C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools`, MSVC 14.51.36231 — separate
+from the VS2022 Community 14.44.35207 install used everywhere else in this doc. Not something
+installed as part of this project's setup; noting it here since it directly caused a build
+failure. vcpkg's own compiler-detection step (used to hash package ABIs and to actually build
+port packages) picked the newer 14.51 toolset by default, independent of whichever `cl.exe`
+the active preset's `CMAKE_CXX_COMPILER` pointed at or which `vcvars64.bat` had been sourced in
+the shell.
+
+**Symptom.** Static libs vcpkg built (Catch2, in particular) referenced internal MSVC STL
+symbols only present in 14.51's headers (`__std_find_last_not_ch_pos_1` and similar
+SIMD-dispatch helpers) that don't exist in 14.44's import libraries — `unresolved external
+symbol` at link time. Two different manifestations of the same root cause turned up: first a
+`_ITERATOR_DEBUG_LEVEL` mismatch (once the compiler was pinned but before the debug/release
+config mapping was fixed — see below), then this symbol-level ABI mismatch (when the pin
+silently stopped applying — see the environment-scoping note below).
+
+**Decision.**
+1. Set `VCPKG_VISUAL_STUDIO_PATH` (environment, not a CMake cache variable — vcpkg's own
+   `vcpkg.exe install` subprocess reads it from the process environment, not from
+   `CMakeCache.txt`) to the VS2022 Community path on both presets, so vcpkg always builds ports
+   with 14.44 — the same toolset the project itself links with.
+2. **Environment-scoping gotcha:** `CMakePresets.json`'s per-preset `environment` block is only
+   applied when CMake is invoked *through the preset* (`cmake --preset X`, `cmake --build
+   --preset X`). A bare `cmake --build <binaryDir>` — including the automatic reconfigure Ninja
+   triggers when a `CMakeLists.txt` changes — does **not** reapply it, and vcpkg's toolset
+   detection silently reverted to 14.51 when that happened mid-session. Always build via
+   `cmake --build --preset <name>` (or `ninja` from a shell where `VCPKG_VISUAL_STUDIO_PATH` was
+   exported directly), never a bare build-directory path, or this pin silently stops applying.
+3. Forcing the release CRT for ASan (decision #0003, item 1) also needs
+   `CMAKE_MAP_IMPORTED_CONFIG_DEBUG=Release` on the sanitize preset: vcpkg selects
+   debug-vs-release *library variants* to hand back from `find_package()` based on
+   `CMAKE_BUILD_TYPE` alone, independent of `CMAKE_MSVC_RUNTIME_LIBRARY` — without this mapping,
+   `CMAKE_BUILD_TYPE=Debug` + forced `/MD` pulls in `Catch2d.lib` (built `/MDd`, IDL=2) against
+   our own `/MD` (IDL=0) code, which fails the same way as the CRT mismatch in #0003 did.
+
+**Verification.** Both presets now produce clean configure-from-scratch + build + `ctest` runs
+(7/7 tests passing on each) after deleting and fully rebuilding both `cmake-build-*` trees.
