@@ -134,27 +134,37 @@ tolerances (loop-closure epsilon, quaternion renormalization threshold) live in 
      not the acceptance criterion itself, but `traverse()` is a named core primitive and needed
      *some* correctness check before being trusted anywhere else.
 
-2. **Rim-loop holonomy vs. analytic angular deficit — done, green under both presets.**
-   Geometric model confirmed with the user 2026-07-22 (circular disks specifically — an
-   ellipse's rim lacks the rotational symmetry an arbitrary twist in `T` needs to map the
-   curve onto itself; see resolved-questions below): disk A and disk B share the same
-   physical boundary circle, portal = a cut along it glued by `T_AtoB`. Derivation in
-   `docs/PHYSICS.md` §1 (branch-cut/monodromy argument, independent of `holonomy()`'s own
-   code — see PHYSICS.md's non-circularity note). `tests/manifold/test_holonomy.cpp`, 5 test
-   cases, all green on both presets:
+2. **Rim-loop holonomy vs. analytic angular deficit — implemented and tested, but with a
+   corrected, narrower claim than originally stated (caught by review, confirmed with the
+   user 2026-07-22).** Geometric model: circular disks specifically (an ellipse's rim lacks
+   the rotational symmetry an arbitrary twist in `T` needs to map the curve onto itself; see
+   resolved-questions below); disk A and disk B share the same physical boundary circle,
+   portal = a cut along it glued by `T_AtoB`. Derivation in `docs/PHYSICS.md` §1.
+
+   **Correction:** the original framing claimed this test independently validates
+   `holonomy()` against a physically-derived analytic value. That doesn't hold up — in this
+   model `T` is the primitive gluing input (spec §1.1), so "holonomy = rotation of `T`" is
+   definitional, not a separately-derivable prediction; there's no second, independent route
+   to the same number the way a real cosmic string's wedge-cut construction gives one (via
+   Gauss–Bonnet). See `docs/PHYSICS.md` §1.4 for the full account. **What the test actually,
+   honestly demonstrates:** `holonomy()` correctly implements "compose in the gluing transform
+   exactly once, at the segment that crosses the cut," robustly across rim position, loop
+   size, and discretization, using the crossing-direction convention shared with
+   `traverse.cpp`. `tests/manifold/test_holonomy.cpp`, 5 test cases, all green on both
+   presets:
    - Baseline: `holonomy()` equals `transformAtoB()` (rotation *and* translation) to `1e-12`.
-   - Independent of `rimAngleRadians` (5 values spanning `0` to `2π`).
-   - Independent of `crossSectionRadius` (`1e-6` to `1.0`, disk radius `2.0`).
-   - Independent of discretization `steps` (`3` to `100`).
+   - Invariant to `rimAngleRadians` (5 values spanning `0` to `2π`).
+   - Invariant to `crossSectionRadius` (`1e-6` to `1.0`, disk radius `2.0`).
+   - Invariant to discretization `steps` (`3` to `100`).
    - Identity portal → identity holonomy (sanity floor).
 
-   One real bug caught along the way: the derivation in `docs/PHYSICS.md` and the
-   implementation in `holonomy.cpp` independently picked *opposite* crossing-direction sign
-   conventions (both plausible in isolation), which the test caught immediately (4 of 5 cases
-   failed, only the identity-portal case passed since it can't distinguish a direction bug).
-   Traced against `traverse.cpp`'s existing convention as the tiebreaker — both docs and code
-   fixed to match it, not tuned to make the test pass. See `docs/PHYSICS.md` §1.2's aside and
-   the `holonomy.cpp` comment on `crossesCutAtoB`.
+   This robustness sweep is what caught a real bug: the derivation in `docs/PHYSICS.md` and
+   the implementation in `holonomy.cpp` independently picked *opposite* crossing-direction
+   sign conventions (both plausible in isolation) — 4 of 5 cases failed immediately, only the
+   direction-blind identity-portal case passed. Traced against `traverse.cpp`'s existing
+   convention as the tiebreaker; both docs and code fixed to match it, not tuned to make the
+   test pass. See `docs/PHYSICS.md` §1.2's aside and the `holonomy.cpp` comment on
+   `crossesCutAtoB`.
 
 ## 5. Sequence
 
@@ -192,8 +202,11 @@ tolerances (loop-closure epsilon, quaternion renormalization threshold) live in 
 
 ## Phase 1 report
 
-**Status: both acceptance criteria met, green under both presets (`msvc-debug`,
-`clang-cl-sanitize` — the required sanitizer gate), 12/12 tests passing on each.**
+**Status: acceptance criterion 1 met as originally stated; criterion 2 implemented and
+tested, but the test demonstrates a narrower (still real) property than "matches an
+independently-derived analytic deficit" — see the correction in §4 item 2 above. Green under
+both presets (`msvc-debug`, `clang-cl-sanitize` — the required sanitizer gate), 12/12 tests
+passing on each.**
 
 **What shipped:**
 - `/src/manifold`: `ChartId`, `SE3` (§3.3), `Point<Chart>`/`Vector<Chart>`/`apply` (§3.2),
@@ -213,12 +226,21 @@ tolerances (loop-closure epsilon, quaternion renormalization threshold) live in 
    applications each); tolerance is an error-propagation bound (`4e-15`/op × N), not tuned
    post-hoc. Observed drift (`1.83e-15` on the `Point`/`apply()` variant) sits comfortably
    under the ~`4e-11` bound without being suspiciously loose relative to it.
-2. Rim-loop holonomy matches the analytic angular deficit. `holonomy()` returns
-   `transformAtoB()` exactly (to `1e-12`) for any rim position, cross-section radius, or
-   discretization step count — confirming the "smeared uniformly around the circle" claim
-   from `portal-sim-agent-prompt.md` §1.2 empirically, not just asserting it.
+2. Rim-loop holonomy — **corrected claim**: `holonomy()` returns `transformAtoB()` exactly
+   (to `1e-12`) for any rim position, cross-section radius, or discretization step count,
+   confirming the "smeared uniformly around the circle" claim from
+   `portal-sim-agent-prompt.md` §1.2 and that the crossing bookkeeping is implemented
+   correctly (it caught a real sign-convention bug). This is **not** an independent match
+   against a physically-derived analytic deficit — in this model `T` is the primitive gluing
+   input, so that value is definitional rather than separately derivable. See
+   `docs/PHYSICS.md` §1.4.
 
 **Known limitations / deferred work:**
+- **Acceptance criterion 2's test is bookkeeping-only, not an independent physical
+  validation** (see the correction above and `docs/PHYSICS.md` §1.4). If a later phase
+  introduces a richer model where `T`'s rotation is *derived* from some more primitive
+  geometric parameter (rather than given directly), this becomes revisitable with a genuine
+  independent oracle at that point.
 - `RapidCheck` (property-based testing) is in the manifest but unused so far — Phase 1's
   tests are hand-picked cases plus parameter sweeps, not generative. Worth adding once
   Phase 2+ introduces more complex invariants where hand-picked cases are more likely to

@@ -8,8 +8,10 @@ Every formula used in code is derived here, cross-referenced to where it's appli
 **Applies to:** `manifold::holonomy()`, `src/manifold/holonomy.hpp` / `holonomy.cpp`.
 **Spec reference:** `portal-sim-agent-prompt.md` §1.2 — the rim carries a conical singularity
 "smeared around the circle," and holonomy around a rim loop is nontrivial by construction, not a
-bug to fix. Phase 1 acceptance criterion 2 (§6): holonomy around a portal rim loop matches the
-analytic angular deficit.
+bug to fix. Phase 1 acceptance criterion 2 (§6) asks for this to match "the analytic angular
+deficit" — **see the honesty note at the end of this section**: in this project's portal model,
+that value turns out to be definitional, not independently derivable, which changes what a test
+against it can actually demonstrate.
 
 **Geometric model** (confirmed with the user 2026-07-22, see
 `docs/phase1-manifold-core.md`, "Open question" section): disk A's boundary circle and disk B's
@@ -82,11 +84,36 @@ error — a single quaternion multiply against identity, so error here is smalle
 change across different `θ`, `δ`, and step-count choices — an empirical check of the
 position-independence claimed above, not just a single-point match.
 
-**Non-circularity note** (why this test is valid evidence, not a tautology): the analytic value
-`R(T_AtoB)` used as the test's expected value comes from the branch-cut argument above — a
-statement about the *continuum* geometry that holds regardless of how `holonomy()` is
-implemented. The implementation instead does discrete parallel transport: it walks the polygon,
-and at whichever segment's endpoints straddle `v = 0` with `u > 0`, it composes in
-`portal.transformAtoB()` or `transformBtoA()` (chosen by crossing direction); segments that don't
-cross contribute nothing. Agreement between that discrete procedure and the continuum prediction
-is a genuine correctness check, not a restatement of the same reasoning.
+### 1.4 Honesty note: this is a bookkeeping check, not an independent physical validation
+
+An earlier version of this document claimed the agreement between `holonomy()`'s output and
+`R(T_AtoB)` was a genuine correctness check because the two came from "different" reasoning
+(discrete parallel transport vs. a continuum branch-cut argument). That claim doesn't survive
+scrutiny: in this manifold, parallel transport *is* flat everywhere except at the cut, so
+"discrete parallel transport around a loop crossing the cut once" **is** "apply the transition
+map once" — there is no second, independent computation for the two to disagree with.
+`holonomy.cpp`'s implementation, stripped of bookkeeping, is one line:
+`accumulated = transformAtoB() * identity`. Testing that against `transformAtoB()` passes by
+construction.
+
+The deeper reason this happens: `portal-sim-agent-prompt.md` §1.1 defines a portal by *giving*
+the isometry `T` directly ("склейка задаётся отображением T") — `T` is the primitive input to
+the model, not a quantity derived from some more basic geometric parameter (contrast a literal
+cosmic string, which arises from excising a wedge of a specific angle from flat space and gluing
+the cut edges — there, the deficit angle is a free parameter of the *embedding*, and the
+holonomy of a loop around the string is a *consequence* you compute independently via
+Gauss–Bonnet, giving two genuinely different routes to the same number). No such second route
+exists for a portal whose gluing map is stipulated directly; `R(T_AtoB)` is what the model *means*
+by "rim deficit," not a prediction to be checked against something more fundamental.
+
+**What `test_holonomy.cpp` actually demonstrates, then** (confirmed with the user 2026-07-22 as
+the honest framing to keep): that `holonomy()` correctly implements "compose in the gluing
+transform exactly once, at exactly the segment that crosses the cut" — robustly across rim
+position (`θ`), loop size (`δ`), and discretization (step count), and using the crossing-direction
+convention shared with `traverse.cpp` (§1.2 above — this is where the implementation actually
+earned its keep: the derivation and the first implementation attempt independently picked
+*opposite* sign conventions, and the position/radius/step-count sweep caught it immediately, since
+4 of 5 test cases failed while only the direction-blind identity-portal case passed). That is a
+real correctness property worth testing. It is **not** a validation against an independently
+derived physical quantity, and Phase 1's acceptance criterion 2 should be read with that
+correction in mind.

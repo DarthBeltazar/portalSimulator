@@ -4,17 +4,17 @@
 #include "manifold/holonomy.hpp"
 #include "manifold/portal.hpp"
 
-// Phase 1 acceptance test (portal-sim-agent-prompt.md §6): holonomy around a portal rim
-// loop matches the analytic angular deficit. Derivation: docs/PHYSICS.md §1. Geometric
-// model and non-circularity argument: docs/phase1-manifold-core.md "Open question" section
-// (confirmed with the user 2026-07-22) and docs/PHYSICS.md §1.2/§1.3.
-//
-// Per the derivation, holonomy() should return exactly portal.transformAtoB() (rotation and
-// translation both, since the crossing applies the full SE3 once) for ANY rimAngleRadians,
-// crossSectionRadius, and steps >= 3 — the manifold is flat away from the idealized
-// zero-width cut, so nothing else along the loop contributes. That position/discretization
-// independence is exactly the "smeared around the circle" claim from
-// portal-sim-agent-prompt.md §1.2, so it's checked explicitly below, not just a single case.
+// Phase 1 acceptance test (portal-sim-agent-prompt.md §6), with a correction: see
+// docs/PHYSICS.md §1.4 ("Honesty note"), confirmed with the user 2026-07-22. This is NOT an
+// independent validation against an analytically-derived deficit — in this portal model,
+// T is the primitive gluing input (spec §1.1), so "holonomy = rotation of T" is definitional,
+// and there is no second, independent route to that number to check against. What this
+// actually tests: that holonomy() correctly implements "compose in the gluing transform
+// exactly once, at exactly the segment that crosses the cut" — robustly across rim position
+// (rimAngleRadians), loop size (crossSectionRadius), discretization (steps), and using the
+// crossing-direction convention shared with traverse.cpp. That's real bookkeeping coverage
+// (it caught a genuine sign-convention bug — see docs/PHYSICS.md §1.2), just not the
+// stronger claim the spec's "аналитический угловой дефицит" language suggests.
 
 using namespace manifold;
 
