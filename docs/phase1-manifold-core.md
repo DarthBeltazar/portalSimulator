@@ -134,12 +134,27 @@ tolerances (loop-closure epsilon, quaternion renormalization threshold) live in 
      not the acceptance criterion itself, but `traverse()` is a named core primitive and needed
      *some* correctness check before being trusted anywhere else.
 
-2. **Rim-loop holonomy vs. analytic angular deficit — blocked on a modeling decision, flagged to
-   the user rather than assumed.** Per review: deriving the analytic value from the same
-   reasoning `holonomy()` itself would use, then testing equality against it, validates nothing
-   (passes by construction). The formula also isn't pinned down by the spec text alone — see the
-   open question below for the proposed resolution and why it needs confirmation before
-   `docs/PHYSICS.md` gets written.
+2. **Rim-loop holonomy vs. analytic angular deficit — done, green under both presets.**
+   Geometric model confirmed with the user 2026-07-22 (circular disks specifically — an
+   ellipse's rim lacks the rotational symmetry an arbitrary twist in `T` needs to map the
+   curve onto itself; see resolved-questions below): disk A and disk B share the same
+   physical boundary circle, portal = a cut along it glued by `T_AtoB`. Derivation in
+   `docs/PHYSICS.md` §1 (branch-cut/monodromy argument, independent of `holonomy()`'s own
+   code — see PHYSICS.md's non-circularity note). `tests/manifold/test_holonomy.cpp`, 5 test
+   cases, all green on both presets:
+   - Baseline: `holonomy()` equals `transformAtoB()` (rotation *and* translation) to `1e-12`.
+   - Independent of `rimAngleRadians` (5 values spanning `0` to `2π`).
+   - Independent of `crossSectionRadius` (`1e-6` to `1.0`, disk radius `2.0`).
+   - Independent of discretization `steps` (`3` to `100`).
+   - Identity portal → identity holonomy (sanity floor).
+
+   One real bug caught along the way: the derivation in `docs/PHYSICS.md` and the
+   implementation in `holonomy.cpp` independently picked *opposite* crossing-direction sign
+   conventions (both plausible in isolation), which the test caught immediately (4 of 5 cases
+   failed, only the identity-portal case passed since it can't distinguish a direction bug).
+   Traced against `traverse.cpp`'s existing convention as the tiebreaker — both docs and code
+   fixed to match it, not tuned to make the test pass. See `docs/PHYSICS.md` §1.2's aside and
+   the `holonomy.cpp` comment on `crossesCutAtoB`.
 
 ## 5. Sequence
 
@@ -155,11 +170,10 @@ tolerances (loop-closure epsilon, quaternion renormalization threshold) live in 
    the sanitizer gate. See §4 below for the two variants and actual observed numbers.
    `traverse()`/`intersectPortal()` also got basic sanity coverage beyond the acceptance
    criterion itself, since traverse() is a named core primitive.
-4. `docs/PHYSICS.md` entry deriving the rim holonomy angular deficit (needed for test 2) — see
-   the open question below. Not started; needs the geometric model pinned down first.
-5. `holonomy()` implementation + acceptance test 2, once (4) is resolved.
-6. Phase-1 report per protocol item 4 (what shipped, acceptance numbers, known limitations) —
-   partial version below for what's done so far; final version once holonomy lands.
+4. ~~`docs/PHYSICS.md` entry deriving the rim holonomy angular deficit~~ **Done** — §1.
+5. ~~`holonomy()` implementation + acceptance test 2~~ **Done and green**, both presets. See
+   §4 item 2 above.
+6. **Phase 1 report** — see bottom of this document.
 
 ## Resolved questions
 
@@ -167,39 +181,61 @@ tolerances (loop-closure epsilon, quaternion renormalization threshold) live in 
 - Language standard: C++23 requested; both installed toolchains only accept it spelled
   `/std:c++23preview` (see caveat in §2 and `docs/DECISIONS.md` #0002) — accepted as the
   practical equivalent until a non-preview flag ships.
+- **Rim-loop geometric model** (was the "open question" in this section): disk A and disk B
+  share the same physical boundary circle — the portal is a cut along that circle, glued by
+  `T`'s rotation. Confirmed with the user 2026-07-22, with an intermediate clarifying
+  exchange about disk shape: this model requires the rim to have enough rotational symmetry
+  that an arbitrary twist in `T` maps the curve onto itself, which holds for a circle but not
+  an ellipse (or any other non-circular shape) — the user confirmed disks are circular
+  specifically, which is what makes the model consistent. See `docs/PHYSICS.md` §1 for the
+  full derivation this unblocked.
 
-## Open question: what does "a loop encircling a portal rim" mean geometrically?
+## Phase 1 report
 
-Needs an answer before `docs/PHYSICS.md` can derive anything for acceptance test 2.
+**Status: both acceptance criteria met, green under both presets (`msvc-debug`,
+`clang-cl-sanitize` — the required sanitizer gate), 12/12 tests passing on each.**
 
-**Why this isn't already answered by the spec.** §1.2 says the rim carries a conical
-singularity "smeared around the circle" (cosmic-string analogy) and holonomy around a rim loop
-is nontrivial. That's a physical claim, not a geometric construction — it doesn't say *where*
-disk A and disk B sit relative to each other in the ambient embedding, and the answer to "does a
-small loop near the rim even close up in space" depends entirely on that.
+**What shipped:**
+- `/src/manifold`: `ChartId`, `SE3` (§3.3), `Point<Chart>`/`Vector<Chart>`/`apply` (§3.2),
+  `traverse()`/`intersectPortal()`, `holonomy()`/`RimLoop`. Named tolerances in
+  `constants.hpp`, no magic numbers.
+- `/tests/manifold`: `test_se3_closed_loop.cpp` (acceptance 1), `test_holonomy.cpp`
+  (acceptance 2), `test_traverse.cpp` (sanity coverage for the traversal primitive).
+- `docs/PHYSICS.md`: rim-holonomy derivation.
+- Bootstrap infra: `vcpkg.json` (minimal manifest — Eigen3, Catch2, RapidCheck only, per
+  "add deps as phases require them"), `CMakePresets.json` (two presets), `cmake/` toolchain
+  glue for the ASan runtime linking gap. `docs/DECISIONS.md` #0001–#0004 log every toolchain
+  deviation and why, per protocol item 2.
 
-**Proposed model** (this is a proposal to confirm or correct, not a settled fact): disk A's
-boundary circle and disk B's boundary circle are the **same physical circle** in the ambient
-embedding — the portal is a cut along that shared circle, with the two sides of the cut glued by
-`T`'s action restricted to the boundary. This matches "smeared around the circle" literally (a
-cosmic string sits *along* a curve; this puts the identification along a curve too, rather than
-across two separate, spatially-unrelated disks), and it's the standard treatment in the
-portal-as-wormhole-mouth literature this spec is drawing on.
+**Acceptance criteria, with numbers:**
+1. 10⁴ closed-loop transitions → identity to machine `double` precision. Two variants (an
+   alternating-inverse loop and a non-commuting 3-transform cycle, ~10⁴ elementary
+   applications each); tolerance is an error-propagation bound (`4e-15`/op × N), not tuned
+   post-hoc. Observed drift (`1.83e-15` on the `Point`/`apply()` variant) sits comfortably
+   under the ~`4e-11` bound without being suspiciously loose relative to it.
+2. Rim-loop holonomy matches the analytic angular deficit. `holonomy()` returns
+   `transformAtoB()` exactly (to `1e-12`) for any rim position, cross-section radius, or
+   discretization step count — confirming the "smeared uniformly around the circle" claim
+   from `portal-sim-agent-prompt.md` §1.2 empirically, not just asserting it.
 
-Under this model, a small loop that threads through the cut once (crosses from the A-side to the
-B-side through a single point near the rim, and closes up in the ambient embedding because both
-sides share the same boundary circle) picks up parallel-transport holonomy equal to **the
-rotational part of `T_AtoB`** — one full application of the gluing map, the same way a loop
-encircling a branch cut in a Riemann surface picks up the monodromy of the cut once per winding.
-This is derivable independently of any `holonomy()` implementation (it's a standard
-branch-cut/monodromy argument, not something read off the code), which is what makes it a valid
-target for a non-circular test: implement `holonomy()` via discrete parallel transport stepped
-around a small loop shrinking toward the rim, and check it *converges* to this independently-
-derived rotational part of `T_AtoB` as the loop tightens — not that the two happen to agree by
-sharing a derivation.
+**Known limitations / deferred work:**
+- `RapidCheck` (property-based testing) is in the manifest but unused so far — Phase 1's
+  tests are hand-picked cases plus parameter sweeps, not generative. Worth adding once
+  Phase 2+ introduces more complex invariants where hand-picked cases are more likely to
+  miss something.
+- `ChartId` uses hop-count as a placeholder identity (`traverse.cpp`); revisit (e.g. a hash
+  of the hop sequence) once a scene can revisit the same hop count via a different path —
+  noted inline where it's assigned.
+- The sanitizer gate has a real, documented coverage gap: STL container-overflow annotations
+  are disabled (`docs/DECISIONS.md` #0003, item 3) because this machine's MSVC toolset lacks
+  `stl_asan.lib` for x64. Heap/stack/global overflows and UBSan checks are unaffected and were
+  empirically verified to still fire.
+- UBSan coverage under `clang-cl` on the MSVC ABI target is narrower than upstream Clang/GCC
+  on Linux (`docs/DECISIONS.md` #0001) — no WSL/Linux toolchain on this machine yet.
+- `traverse()`'s ray-disk intersection is plain-double, not CGAL-exact — expected, since exact
+  predicates and rim cutting are explicitly a later-phase geometry-module concern
+  (`portal-sim-agent-prompt.md` §4), not something Phase 1 needs.
 
-**If this model is wrong or underspecified, please correct it** — in particular whether disk A
-and disk B sharing a physical boundary circle is actually the intended construction, or whether
-portals are meant to connect spatially separate disks with rim holonomy defined some other way
-(in which case "a loop encircling the rim" needs a different — and still concrete — geometric
-definition before anything can be derived).
+**What's next:** Phase 2 (rendering, Embree CPU reference first) per the phase ordering in
+`CLAUDE.md` / `portal-sim-agent-prompt.md` §6 — needs its own design doc and confirmation
+before implementation starts, per the same protocol this phase followed.

@@ -1,31 +1,40 @@
 #pragma once
 
-#include <vector>
-
 #include "portal.hpp"
 #include "se3.hpp"
-#include "traverse.hpp"
 
-// holonomy(): parallel-transport holonomy along a closed loop (portal-sim-agent-prompt.md
-// §5.1). Nontrivial by construction for a loop that encircles a portal rim — the rim
+// holonomy(): parallel-transport holonomy of a small loop encircling a portal's rim at one
+// point (portal-sim-agent-prompt.md §5.1, §1.2). Nontrivial by construction — the rim
 // carries a conical singularity, and this is the physical reality of the construction, not
-// a bug (§1.2).
+// a bug.
 //
-// Declaration only for now. The acceptance test for this (portal-sim-agent-prompt.md §6,
-// Phase 1) needs an independent analytic angular-deficit value to compare against — see
-// docs/phase1-manifold-core.md §4, item 2. Implementing this against a self-derived
-// formula and then testing it against that same formula would validate nothing (the test
-// would pass by construction); the concrete rim/disk geometric model needs pinning down
-// with an independent derivation in docs/PHYSICS.md first, which is a separate work item
-// flagged to the user rather than assumed here.
+// See docs/PHYSICS.md §1 for the derivation this implements, and
+// docs/phase1-manifold-core.md's "Open question" section for the geometric model
+// (confirmed with the user 2026-07-22): disk A and disk B share the same physical boundary
+// circle, and the portal is a cut along that circle glued by transformAtoB(). Note this is
+// a different loop shape from the multi-portal composition loops in
+// test_se3_closed_loop.cpp — those walk a sequence of full portal crossings between
+// distinct disks; this loop is a small, local loop that only grazes a single rim point.
 
 namespace manifold {
 
-// A closed loop, expressed as an ordered sequence of portal crossings starting and ending
-// at the same physical location (in canonical local coordinates — see traverse.hpp).
-// `loop` should compose to a net-zero spatial displacement in the base chart; whether it
-// encircles a rim (and therefore should NOT return identity) depends on the winding of the
-// path relative to the portal's disks, which is part of the pending geometric model.
-SE3 holonomy(const std::vector<Portal>& loop);
+// A small loop encircling the portal's rim at a single point, in the local 2D plane
+// perpendicular to the rim circle's tangent there (see docs/PHYSICS.md §1.1 for the (u, v)
+// coordinate setup). `rimAngleRadians` picks the point on the rim (0 to 2*pi around the
+// disk's own `up`/`normal x up` basis); `crossSectionRadius` is the loop's radius in that
+// local plane and must be well under the disk's own radius so the loop only links the rim
+// locally; `steps` is how many straight segments approximate the loop's circle — any value
+// >= 3 suffices per docs/PHYSICS.md §1.2 (at most one segment can straddle the cut).
+struct RimLoop {
+    double rimAngleRadians;
+    double crossSectionRadius;
+    int steps;
+};
+
+// Per docs/PHYSICS.md §1.2, this is exactly the rotational part of portal.transformAtoB()
+// (as a full SE3, translation included from the single crossing) for any valid RimLoop —
+// independent of rimAngleRadians, crossSectionRadius, and steps, because the manifold is
+// flat everywhere except the idealized zero-width cut at the rim.
+SE3 holonomy(const Portal& portal, const RimLoop& loop);
 
 } // namespace manifold

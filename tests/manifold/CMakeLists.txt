@@ -1,6 +1,7 @@
 add_executable(manifold_tests
     test_se3_closed_loop.cpp
     test_traverse.cpp
+    test_holonomy.cpp
 )
 target_link_libraries(manifold_tests PRIVATE manifold_core Catch2::Catch2WithMain)
 
