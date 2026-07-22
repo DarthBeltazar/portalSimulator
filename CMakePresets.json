@@ -1,0 +1,56 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-${presetName}",
+      "toolchainFile": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "23",
+        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "inherits": "base",
+      "displayName": "MSVC debug (dev iteration)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "cl",
+        "CMAKE_CXX_FLAGS": "/Zc:__cplusplus /W4 /EHsc"
+      },
+      "architecture": { "value": "x64", "strategy": "external" },
+      "environment": {
+        "VCPKG_DEFAULT_TRIPLET": "x64-windows"
+      }
+    },
+    {
+      "name": "clang-cl-sanitize",
+      "inherits": "base",
+      "displayName": "clang-cl ASan+UBSan (required merge gate)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL",
+        "CMAKE_CXX_FLAGS": "/Zc:__cplusplus /W4 /EHsc /fp:precise -fsanitize=address,undefined /D_DISABLE_VECTOR_ANNOTATION /D_DISABLE_STRING_ANNOTATION",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/clang-cl-asan-linker-flags.cmake"
+      },
+      "architecture": { "value": "x64", "strategy": "external" },
+      "environment": {
+        "VCPKG_DEFAULT_TRIPLET": "x64-windows"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "msvc-debug", "configurePreset": "msvc-debug" },
+    { "name": "clang-cl-sanitize", "configurePreset": "clang-cl-sanitize" }
+  ],
+  "testPresets": [
+    { "name": "msvc-debug", "configurePreset": "msvc-debug", "output": { "outputOnFailure": true } },
+    { "name": "clang-cl-sanitize", "configurePreset": "clang-cl-sanitize", "output": { "outputOnFailure": true } }
+  ]
+}

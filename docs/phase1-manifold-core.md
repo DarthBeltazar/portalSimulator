@@ -1,7 +1,6 @@
 # Phase 1 — Manifold core: design doc
 
-Status: **draft, awaiting confirmation**. Per `CLAUDE.md` protocol, nothing beyond this document
-gets written until the open questions below are resolved — no interfaces, no tests, no impl.
+Status: **confirmed** — §3.2 scheme accepted, C++23 requested. Proceeding to §5 sequence.
 
 ## 1. Scope
 
@@ -27,12 +26,17 @@ those enter the manifest at the phase boundary that needs them, per
 **`CMakePresets.json`** — two configure presets, both compilers already installed on this
 machine (no new system installs required):
 
-- `msvc-debug` — `cl.exe` 19.44 (VS2022 Community), Ninja generator, `/W4`, C++20
-  (`std::float128_t`/other C++23-only features are not needed by Phase 1 math; revisit the
-  C++23-vs-20 fallback per-phase if a later phase needs something MSVC blocks).
-- `clang-cl-sanitize` — native LLVM `clang-cl`, `-fsanitize=address,undefined`, `/fp:precise`
-  (MSVC-driver equivalent of `-ffp-contract=off`). This is the required sanitizer gate before
-  the phase merges, with the coverage caveat logged in `docs/DECISIONS.md` #0001.
+- `msvc-debug` — `cl.exe` 19.44 (VS2022 Community), Ninja generator, `/W4`, C++23.
+- `clang-cl-sanitize` — native LLVM `clang-cl` 22.1.8, `-fsanitize=address,undefined`,
+  `/fp:precise` (MSVC-driver equivalent of `-ffp-contract=off`). This is the required sanitizer
+  gate before the phase merges, with the coverage caveat logged in `docs/DECISIONS.md` #0001.
+
+**C++23 flag caveat (verified empirically, logged in `docs/DECISIONS.md` #0002):** neither
+compiler installed on this machine accepts plain `/std:c++23` — MSVC 19.44 rejects it outright
+(`D9002: ignoring unknown option`) and clang-cl 22.1.8's `/std:` only lists
+`c++14,c++17,c++20,c++23preview,c++latest`. Both presets use **`/std:c++23preview
+/Zc:__cplusplus`** instead; confirmed to compile `<expected>` and report `__cplusplus` correctly
+on both toolchains. Revisit when either ships a non-preview `/std:c++23` spelling.
 
 Both presets build the same `/src/manifold` sources and the same Catch2 test binary — no
 sanitizer-only code paths.
@@ -90,11 +94,7 @@ which doesn't scale to real traversal (arbitrary hop count decided by scene geom
   fits that call site. The unbounded/dynamic part and the statically-checked part meet at exactly
   one seam: `apply()`.
 
-**This is a design interpretation, not a literal transcription of the spec text — flagging for
-explicit confirmation before it becomes the interfaces everything else builds on**, per the
-advisor review that prompted this doc. The alternative reading (runtime-checked chart equality
-via an assert in `operator-`, no compile-time enforcement at all) is simpler but doesn't satisfy
-"mixing charts is a *compile* error"; happy to switch if there's a reading of §5.1 I'm missing.
+**Confirmed by user 2026-07-22** as the mechanism to build against.
 
 ### 3.3 SE3 and invariants
 
@@ -127,9 +127,13 @@ tolerances (loop-closure epsilon, quaternion renormalization threshold) live in 
    above is confirmed, and flag if the cosmic-string analogy needs a modeling choice I should ask
    about rather than assume.
 
-## 5. Sequence once this doc is confirmed
+## 5. Sequence
 
-1. `vcpkg.json` + `CMakePresets.json` (§2).
+1. ~~`vcpkg.json` + `CMakePresets.json` (§2).~~ **Done.** Both `msvc-debug` and
+   `clang-cl-sanitize` configure and build cleanly, and the sanitizer preset was verified to
+   actually catch a real bug (stack-buffer-overflow + UBSan out-of-bounds), not just link.
+   vcpkg vendored as a git submodule (`/vcpkg`) with a pinned `builtin-baseline`. Three
+   Windows-specific link/runtime issues surfaced and were fixed — see `docs/DECISIONS.md` #0003.
 2. `docs/PHYSICS.md` entry deriving the rim holonomy angular deficit (needed for test 2).
 3. Header-only interfaces: `ChartId`, `SE3`, `Point`/`Vector`/`apply`, `traverse`, `holonomy`
    signatures — no bodies yet.
@@ -137,9 +141,9 @@ tolerances (loop-closure epsilon, quaternion renormalization threshold) live in 
 5. Implementation, iterating until both tests are green under `clang-cl-sanitize`.
 6. Phase-1 report per protocol item 4 (what shipped, acceptance numbers, known limitations).
 
-## Open questions for the user
+## Resolved questions
 
-- Does the two-tier design in §3.2 match the intent behind §5.1, or is there a specific
-  compile-time-only mechanism already envisioned that this should follow instead?
-- Any objection to C++20 (not 23) for this phase specifically, revisited later if a phase needs
-  a C++23-only feature MSVC doesn't support?
+- §3.2 scheme: confirmed as-is.
+- Language standard: C++23 requested; both installed toolchains only accept it spelled
+  `/std:c++23preview` (see caveat in §2 and `docs/DECISIONS.md` #0002) — accepted as the
+  practical equivalent until a non-preview flag ships.
