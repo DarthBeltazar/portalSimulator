@@ -6,6 +6,13 @@
     "eigen3",
     "catch2",
     "rapidcheck",
-    "embree"
+    "embree",
+    "vulkan",
+    "vulkan-headers",
+    "vulkan-loader",
+    "volk",
+    "vulkan-memory-allocator",
+    "vk-bootstrap",
+    "shader-slang"
   ]
 }

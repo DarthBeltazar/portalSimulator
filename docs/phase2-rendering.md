@@ -208,7 +208,27 @@ enough, and `/src/geometry/` is explicitly a later-phase (rim cutting, Phase 5) 
    **Done (2026-07-23):** `vulkaninfo` confirms this machine's GPU (NVIDIA GeForce RTX 4080
    SUPER, driver 595.79, Vulkan instance 1.4.328) exposes `VK_KHR_ray_tracing_pipeline`,
    `VK_KHR_ray_query`, and `VK_KHR_acceleration_structure` — criterion 3 is achievable on this
-   machine. Shader-structure and image-comparison-metric decisions below.
+   machine. Checkpoint decisions, all confirmed with the user 2026-07-23 (see
+   `docs/DECISIONS.md` #0006–#0008 for full writeups):
+   - **Shader structure:** ray query (`RayQuery<>`) from a single Slang compute shader, not a
+     full `VK_KHR_ray_tracing_pipeline` with SBT/hit groups — mirrors the Embree path's own
+     per-hop "portal or geometry, whichever nearer" loop directly (#0007). De-risked empirically:
+     a `RayQuery<>` compute shader compiled through Slang → SPIR-V and passed `spirv-val` on this
+     machine before the decision was finalized.
+   - **Float in the shader (antipattern #3 exception):** scoped to the GPU shading/tracing path
+     only — manifold core/physics/fields stay `double`. The GPU path is a rendering cross-check
+     against the exact double Embree reference, not a simulation authority (#0006).
+   - **Antipattern #8 (duplication):** the GPU shader needs its own Slang port of
+     disk-intersection + SE3-apply (a shader can't call CPU C++). Mitigated by a differential
+     test — identical rays through `stepThroughNearestPortal` and the shader port, asserting
+     agreement within float tolerance — written *before* the rest of the GPU pipeline, per this
+     project's test-first discipline (#0006's note).
+   - **§5.3's RMSE threshold:** deliberately not fixed yet — will be measured from the first real
+     GPU-vs-Embree image pair and justified from where the residual concentrates, not picked in
+     advance (#0008).
+   - **vcpkg.json:** added `vulkan`, `vulkan-headers`, `vulkan-loader`, `volk`,
+     `vulkan-memory-allocator`, `vk-bootstrap`, `shader-slang` — all resolved cleanly on
+     `msvc-debug` reconfigure, existing targets unaffected.
 8. Vulkan RT implementation, criterion 3, final Phase 2 report.
 
 ## Open questions for the user

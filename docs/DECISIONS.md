@@ -201,3 +201,111 @@ under `msvc-debug` (all tests, both executables); 17/17 pass under `clang-cl-san
 correctly not discovered). Running `render_tests_embree.exe` directly under
 `clang-cl-sanitize` still reproduces the bad-free, confirming the scoping is hiding a documented
 toolchain gap, not masking a since-fixed problem.
+
+## 0006 — Float precision inside the Vulkan RT shader path (scoped exception to antipattern #3)
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** `CLAUDE.md` antipattern #3: "No `float` in traversal or accumulated-transform
+stacks — `double` only." The Vulkan RT sub-step's per-hop portal loop runs inside a Slang compute
+shader, which is float-native (GPUs don't do efficient `double`; SPIR-V ray tracing/ray query is
+specified in terms of 32-bit floats). Implementing the shader's portal-hop loop necessarily means
+an accumulated-transform stack in `float`, which is a literal instance of the pattern the
+antipattern names.
+
+**Decision.** Confirmed with the user (explicit question, not silent substitution, per
+`CLAUDE.md`'s working protocol): `float` is scoped to the GPU shading/tracing path only.
+
+- The manifold core (`src/manifold`), physics (Phase 3+), and fields (Phase 4+) remain
+  `double`-only, unaffected — this exception does not touch anything CLAUDE.md's determinism and
+  cross-compiler-reproducibility requirements actually govern (simulation state).
+- The GPU path is a **rendering cross-check**, not a simulation authority: it exists to validate
+  the Vulkan RT backend produces the same image as the exact double-precision Embree/CPU
+  reference (criterion 3, §5.3), within an explicit image-comparison threshold. It never feeds
+  back into simulation state.
+- Accumulated float error is bounded by `constants::kMaxPortalHops` (the same small, named
+  constant the CPU path already uses) — not an unbounded accumulation, and directly comparable
+  against the CPU reference's exact result via the RMSE-based acceptance test rather than trusted
+  blindly.
+
+**Revisit if:** a future phase wants the GPU path to feed back into anything authoritative (it
+shouldn't need to, per the "Embree is the reference, GPU is cross-checked against it" architecture
+in `docs/phase2-rendering.md`), or double-rate GPU hardware becomes practical for this workload.
+
+## 0007 — Ray query in a single compute shader, not a full ray tracing pipeline
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** Both `VK_KHR_ray_tracing_pipeline` (SBT, hit groups, closest-hit/miss shaders) and
+`VK_KHR_ray_query` (inline ray queries from any shader stage) are in `CLAUDE.md`'s sanctioned
+stack — this is an implementation-strategy choice within the approved stack, not a stack
+deviation requiring justification the way #0006 above does.
+
+**Decision.** Ray query (`RayQuery<>` in Slang) from a single compute shader, mirroring the
+Embree path's own control flow (`renderer.cpp`'s `traceRay`/`isOccluded`): at each hop, query the
+nearest hit (portal disk or scene geometry, whichever is nearer — by capping the query's `tMax` at
+the portal-crossing distance, same trick the Embree path uses with `rtcIntersect1`'s `tfar`) and
+decide whether to continue through a portal or shade/terminate. Rejected: the full RT-pipeline
+model, because —
+
+1. Our loop's control flow (compare portal-vs-geometry distance every hop, no recursion, decide in
+   the same shader) doesn't map onto "acceleration structure autonomously dispatches to
+   closest-hit/miss shaders per traced ray" without either recursive `TraceRay` calls back into the
+   pipeline from closest-hit (recursion-depth bookkeeping for no benefit) or doing the whole loop
+   in raygen anyway with non-recursive traces — the same shape as ray query, but through SBT
+   indirection.
+2. SBT/hit-group dispatch exists to route different materials/geometry types to different shaders
+   without CPU involvement. This renderer has exactly one material (Lambertian) and one geometry
+   category (triangles) — the mechanism buys nothing here.
+3. Fewer structural differences between the CPU (`stepThroughNearestPortal` loop) and GPU (ray
+   query loop) implementations makes the differential test (decision #0006's sibling concern,
+   antipattern #8's mitigation — see the note below) easier to write and keep meaningful.
+4. Empirically de-risked before committing: a trivial Slang compute shader using `RayQuery<>`
+   compiled to SPIR-V and passed `spirv-val` on this machine (RTX 4080 SUPER, driver 595.79)
+   before this decision was finalized.
+
+**Note on antipattern #8 (no scattered portal logic):** a GPU shader cannot call the CPU's
+`manifold::stepThroughNearestPortal` — it is compiled C++ running on the CPU. The Vulkan path
+requires a hand-written Slang port of the same disk-intersection + SE3-apply math, which is a
+second copy of portal-crossing logic, precisely what antipattern #8 warns against and what
+`docs/phase2-rendering.md` §3 flagged as a risk to revisit "if a third consumer shows the shared
+primitive isn't enough." Confirmed with the user this is acceptable *conditioned on* a
+differential test — identical rays through the CPU primitive and the GPU shader port, asserting
+numeric agreement within float tolerance — written before the rest of the GPU pipeline is built
+around the port, so the duplication is a validated, gated mirror rather than silent drift.
+
+## 0008 — Criterion 3's RMSE threshold: measured from real images, not picked in advance
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** `docs/phase2-rendering.md` §5.3 requires an image-comparison metric and threshold
+between the GPU and Embree renders of the same scene, "both to be justified rather than picked
+arbitrarily." Both renderers are point-sampled (one ray per pixel, no anti-aliasing/stochastic
+sampling) with identical direct-lighting math, so away from geometric edges the two images should
+agree to float-vs-double rounding (~1e-6 relative, negligible after `kMaxPortalHops`-bounded
+accumulation). At hard edges (shadow boundaries, portal-disk silhouettes, corridor ring
+boundaries, triangle edges), Embree's software BVH traversal and Vulkan's hardware-accelerated BVH
+can disagree by one ULP and flip a boundary pixel between hit/miss or lit/shadowed — a large
+per-pixel error concentrated in a thin fringe, inherent to comparing single-sample renderers
+numerically, not a correctness bug. RMSE (mean-*squared* error) is disproportionately sensitive to
+this small number of large-error boundary pixels.
+
+**Decision.** Do not fix a numeric threshold before seeing real images from both backends (which
+would risk either too tight — spurious failures from expected edge aliasing — or too loose —
+masking a real transform/shading bug). Instead: render both backends on the acceptance scene,
+compute whole-image RMSE, and inspect where the residual concentrates.
+
+- If concentrated in a thin (~1px) fringe at known edges (shadow boundary, portal rim, triangle
+  silhouette) — expected, not a bug. Set the threshold from the observed non-edge-region error
+  plus a margin, or use a robust/windowed metric (e.g., excluding a small dilation around detected
+  edges, or a high percentile rather than the mean) as the primary gate, with whole-image RMSE
+  reported for visibility.
+- If the residual is systematic across broad regions — that is a real bug (wrong portal
+  transform, wrong shading term) and must be root-caused per `CLAUDE.md`'s "don't loosen the
+  tolerance, find the root cause," not papered over with a looser threshold.
+
+This entry will be updated with the concrete threshold and its justification once criterion 3's
+implementation produces a first image pair.
