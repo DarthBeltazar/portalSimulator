@@ -1,8 +1,9 @@
 add_executable(render_tests
     test_corridor_brightness.cpp
     test_corridor_render.cpp
+    test_vulkan_context_smoke.cpp
 )
-target_link_libraries(render_tests PRIVATE render_core manifold_core Catch2::Catch2WithMain)
+target_link_libraries(render_tests PRIVATE render_core render_vulkan manifold_core Catch2::Catch2WithMain)
 
 copy_asan_runtime_dll(render_tests)
 

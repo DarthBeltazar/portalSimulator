@@ -5,8 +5,35 @@ find_package(Eigen3 CONFIG REQUIRED)
 find_package(Catch2 3 CONFIG REQUIRED)
 find_package(rapidcheck CONFIG REQUIRED)
 find_package(embree CONFIG REQUIRED)
+find_package(Vulkan REQUIRED)
+find_package(volk CONFIG REQUIRED)
+find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_package(vk-bootstrap CONFIG REQUIRED)
 
 enable_testing()
+
+# Offline Slang -> SPIR-V compilation (docs/phase2-rendering.md §7 step 8). vcpkg's
+# shader-slang port installs slangc.exe as a host tool alongside the library, on
+# CMAKE_PROGRAM_PATH via the vcpkg toolchain file, so a plain find_program locates it without
+# needing the system Vulkan SDK.
+find_program(SLANGC_EXECUTABLE NAMES slangc REQUIRED)
+
+# Compiles a .slang shader to SPIR-V at build time and returns the output path in OUT_VAR.
+# Mirrors this project's other build-time codegen (Catch2 test discovery, ASan DLL copying):
+# a named custom command, not a hidden step, so `ninja -t targets` shows it.
+function(compile_slang_shader source_file entry_point profile out_var)
+  get_filename_component(_name ${source_file} NAME_WE)
+  set(_spv "${CMAKE_CURRENT_BINARY_DIR}/${_name}.spv")
+  add_custom_command(
+    OUTPUT "${_spv}"
+    COMMAND "${SLANGC_EXECUTABLE}" "${source_file}" -profile "${profile}" -target spirv
+            -entry "${entry_point}" -capability spvRayQueryKHR -o "${_spv}"
+    DEPENDS "${source_file}"
+    COMMENT "Compiling ${source_file} -> ${_spv} (Slang)"
+    VERBATIM
+  )
+  set(${out_var} "${_spv}" PARENT_SCOPE)
+endfunction()
 
 # Whether this configure is the clang-cl ASan+UBSan preset. Shared by copy_asan_runtime_dll()
 # below and by tests/render/CMakeLists.txt, which uses it to decide whether a Catch2 binary
