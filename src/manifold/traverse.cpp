@@ -50,6 +50,39 @@ DiskHit intersectPortal(const Eigen::Vector3d& origin, const Eigen::Vector3d& di
     return result;
 }
 
+PortalHopResult stepThroughNearestPortal(const Eigen::Vector3d& origin,
+                                          const Eigen::Vector3d& direction,
+                                          const std::vector<Portal>& portals,
+                                          double max_distance) {
+    double closestDistance = max_distance;
+    const Portal* closestPortal = nullptr;
+    bool closestIsDiskA = false;
+
+    for (const Portal& portal : portals) {
+        DiskHit hit = intersectPortal(origin, direction, portal, closestDistance);
+        if (hit.hit && hit.distance < closestDistance) {
+            closestDistance = hit.distance;
+            closestPortal = &portal;
+            closestIsDiskA = hit.isDiskA;
+        }
+    }
+
+    if (closestPortal == nullptr) {
+        return PortalHopResult{};
+    }
+
+    const SE3& hopTransform =
+        closestIsDiskA ? closestPortal->transformAtoB() : closestPortal->transformBtoA();
+
+    PortalHopResult result;
+    result.crossed = true;
+    result.distanceToHit = closestDistance;
+    result.newOrigin = hopTransform.applyToPoint(origin + closestDistance * direction);
+    result.newDirection = hopTransform.applyToVector(direction);
+    result.hopTransform = hopTransform;
+    return result;
+}
+
 namespace detail {
 
 TraversalResult traverseImpl(const Eigen::Vector3d& origin, const Eigen::Vector3d& direction,
@@ -62,34 +95,14 @@ TraversalResult traverseImpl(const Eigen::Vector3d& origin, const Eigen::Vector3
     constexpr double kMaxDistance = std::numeric_limits<double>::max();
 
     for (; hopCount < max_hops; ++hopCount) {
-        bool anyHit = false;
-        double closestDistance = kMaxDistance;
-        const Portal* closestPortal = nullptr;
-        bool closestIsDiskA = false;
-
-        for (const Portal& portal : portals) {
-            DiskHit hit = intersectPortal(currentOrigin, currentDirection, portal, closestDistance);
-            if (hit.hit && hit.distance < closestDistance) {
-                anyHit = true;
-                closestDistance = hit.distance;
-                closestPortal = &portal;
-                closestIsDiskA = hit.isDiskA;
-            }
-        }
-
-        if (!anyHit) {
+        PortalHopResult hop = stepThroughNearestPortal(currentOrigin, currentDirection, portals, kMaxDistance);
+        if (!hop.crossed) {
             break;
         }
 
-        const SE3& hopTransform =
-            closestIsDiskA ? closestPortal->transformAtoB() : closestPortal->transformBtoA();
-
-        // Advance to the hit point, then hand off to the far side of the portal.
-        currentOrigin = currentOrigin + closestDistance * currentDirection;
-        currentOrigin = hopTransform.applyToPoint(currentOrigin);
-        currentDirection = hopTransform.applyToVector(currentDirection);
-
-        accumulated = hopTransform * accumulated;
+        currentOrigin = hop.newOrigin;
+        currentDirection = hop.newDirection;
+        accumulated = hop.hopTransform * accumulated;
     }
 
     // Placeholder chart identity for Phase 1: the hop count uniquely enough identifies the

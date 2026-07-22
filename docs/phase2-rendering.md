@@ -1,7 +1,7 @@
 # Phase 2 — Rendering: design doc
 
-Status: **draft, awaiting confirmation**. Per protocol, nothing beyond this document gets
-written until the open questions below are resolved.
+Status: **Phase 2a (Embree) merge-ready (2026-07-23)**; Vulkan RT (§7 step 8) underway. All open
+questions below are resolved.
 
 ## 1. Scope
 
@@ -123,20 +123,22 @@ downstream, so raising it explicitly rather than picking silently.
 **Scene:** two portals `A`, `B` facing each other across a corridor of length `L`, each disk
 radius `R`, positioned so looking into `A` shows the corridor continuing through `B` — and `B`,
 itself a portal back to the region beyond `A`, recurses: each successive visible "copy" of the
-corridor is geometrically self-similar to the outer one, just seen from one hop further in (a
-Droste/video-feedback effect, not a simple single light's inverse-square falloff — the "geometric
-progression" language in §6 reads as pointing at this self-similarity specifically: consecutive
-recursion levels should shrink by a *constant* ratio, which only follows from the self-similar
-framing, not from naive distance-based falloff of a fixed light source).
+corridor sits one hop further down the same straight, unfolded corridor.
 
-**Deferred, not decided here:** the exact similar-triangles/perspective-projection formula for
-that constant ratio, as a function of `L` and `R`, needs its own derivation in `docs/PHYSICS.md`
-before the test can be written — same discipline as Phase 1's holonomy formula. Explicitly
-flagging the lesson from Phase 1's rim-holonomy mistake: that derivation must come from
-projective geometry (similar triangles on the camera frustum), independent of the renderer's own
-ray-marching code, or the test would validate nothing. Will write it as its own step, before
-touching the renderer's implementation, and call out plainly if it turns out to reduce to
-something definitional the way the rim-holonomy comparison did.
+**Corrected (2026-07-22, see `docs/PHYSICS.md` §2):** an earlier draft of this section described
+this as a Droste/video-feedback effect where "consecutive recursion levels shrink by a *constant*
+ratio." That doesn't survive an independent check — `transformAtoB` is a pure isometry
+(`CLAUDE.md` antipattern #6, no scaling ever), so repeated hops can only add distance arithmetically
+(`D_n = d0 + nL`); they can never compound a *scale* factor the way a true self-similar zoom
+requires. `PHYSICS.md` §2 derives the exact on-axis solid angle of the n-th visible ring,
+`Ω_n = 2π(1 − D_n/√(D_n²+R²))`, which for `D_n ≫ R` is an **inverse-square power law in `n`**
+(`Ω_n ≈ πR²/D_n²`), not an exponential — the consecutive-term ratio `Ω_n/Ω_{n+1} → 1` as `n→∞`,
+the opposite of a geometric sequence's defining property. The acceptance criterion's "geometric
+progression" language is read as "converges to the value predicted by this closed form," not as a
+literal constant-ratio claim — same discipline `PHYSICS.md` §1.4 applied after the rim-holonomy
+correction: don't loosen the test to fit imprecise spec wording, derive the actual quantity
+independently (projective geometry / similar triangles on the camera frustum, not the renderer's
+own ray-marching recursion) and test against that.
 
 ### 5.2 Shadow through a portal
 
@@ -162,25 +164,77 @@ enough, and `/src/geometry/` is explicitly a later-phase (rim cutting, Phase 5) 
 
 ## 7. Sequence
 
-1. Add `embree` to `vcpkg.json`; confirm it configures/builds on this machine (own verification
-   step, like Phase 1's toolchain checks).
-2. `docs/PHYSICS.md` entry deriving the corridor brightness-progression ratio (§5.1).
-3. Header-only interfaces: `stepThroughNearestPortal` (§3), `Scene`/`Camera`/`Light` types,
-   the Embree renderer's entry point — no bodies yet.
-4. Catch2 tests for acceptance criteria 1 and 2 (Embree path).
-5. Implementation, iterating until green.
-6. Phase 2a report (Embree done) — then a short confirmation checkpoint before starting Vulkan
+1. **Done (2026-07-22).** Added `embree` to `vcpkg.json`; both `msvc-debug` and
+   `clang-cl-sanitize` presets configure, build, and pass all 12 existing Phase 1 tests with it
+   in the dependency graph.
+2. **Done (2026-07-22).** `docs/PHYSICS.md` §2 derives the corridor brightness-progression
+   formula (§5.1) — an exact inverse-square power law, not a literal constant ratio; see §5.1
+   above for the correction to this doc's own earlier framing.
+3. **Done (2026-07-22).** `stepThroughNearestPortal` (§3) implemented and `traverse()`
+   refactored to a thin loop over it — pure extraction, Phase 1's 12 tests pass unmodified
+   under both presets. `render::Scene`/`Camera`/`Light`/`Image`/`renderEmbree` declared as an
+   INTERFACE-only library (`src/render`, no `.cpp` bodies yet) — compiles clean under both
+   `cl` and `clang-cl`.
+4. **Done (2026-07-22).** `tests/render/test_corridor_brightness.cpp`: the corridor-recursion
+   *mechanism* and the closed-form formula (eq. 2.1, and the consecutive-ratio-converges-to-1
+   property from §2.4) — this only needed `manifold_core`.
+   `tests/render/test_corridor_render.cpp`: criterion 1's pixel-level test, added once
+   `render::Camera` had a real implementation (`camera.cpp`). Deliberately does **not** drive
+   `render::Scene`/`renderEmbree` — `docs/PHYSICS.md` §2's closing note explains why (radiance
+   is conserved crossing an isometry, so per-pixel brightness through the rings is flat; the
+   ring-boundary *angle* is the only measurable a per-pixel image can exhibit, and it's a fact
+   about ray/portal geometry `traverse()` already provides).
+5. **Done (2026-07-22).** Implementation: `render::Camera`, `render::Scene` (Embree
+   device/scene/geometry), `render::renderEmbree` (primary rays through
+   `stepThroughNearestPortal` + Embree, Lambertian direct lighting, portal-aware shadow rays).
+   `docs/PHYSICS.md` §3 derives the method-of-images fix shadow rays needed (a light's raw
+   `position` is only valid at zero hops; otherwise use its *image* under the primary ray's
+   accumulated transform) — caught by writing the negative control first (reverting the fix
+   makes `tests/render/test_shadow_through_portal.cpp` fail, confirming the test is
+   load-bearing, not vacuous). Criterion 2's acceptance test
+   (`test_shadow_through_portal.cpp`) is green under `msvc-debug`, including the reverted-fix
+   regression check.
+6. **Done (2026-07-23).** Sanitizer gate resolved per `docs/DECISIONS.md` #0005: split
+   `tests/render` into `render_tests` (corridor tests, no Embree dependency, runs under both
+   presets) and `render_tests_embree` (`test_shadow_through_portal.cpp`, runs under
+   `msvc-debug` only — `catch_discover_tests` skipped under `clang-cl-sanitize` via the new
+   `PORTAL_SIM_ASAN_ACTIVE` CMake variable). Verified on a fully fresh rebuild of both presets:
+   19/19 under `msvc-debug`, 17/17 under `clang-cl-sanitize`; running `render_tests_embree.exe`
+   directly under the sanitizer still reproduces the documented bad-free, confirming this scopes
+   a real toolchain gap rather than masking a fixed one. **Phase 2a (Embree) is merge-ready.**
+7. Phase 2a report (Embree done) — then a short confirmation checkpoint before starting Vulkan
    RT interfaces, covering: the GPU/driver capability check from §2, the Slang shader structure,
    and the image-comparison metric/threshold from §5.3.
-7. Vulkan RT implementation, criterion 3, final Phase 2 report.
+   **Done (2026-07-23):** `vulkaninfo` confirms this machine's GPU (NVIDIA GeForce RTX 4080
+   SUPER, driver 595.79, Vulkan instance 1.4.328) exposes `VK_KHR_ray_tracing_pipeline`,
+   `VK_KHR_ray_query`, and `VK_KHR_acceleration_structure` — criterion 3 is achievable on this
+   machine. Shader-structure and image-comparison-metric decisions below.
+8. Vulkan RT implementation, criterion 3, final Phase 2 report.
 
 ## Open questions for the user
 
-- §3: does the "shared primitive, not a generalized `traverse()`" resolution match the intent
-  behind the manifold-core contract, or would you rather `traverse()` itself take a pluggable
-  scene-intersector so render and physics call the literal same top-level function?
-- §1: is the Embree-first-then-lighter-Vulkan-checkpoint sequencing (one design doc covering
-  both, not two full cycles) the right level of process, or would you rather Vulkan RT get its
-  own full design-doc-and-wait cycle when the time comes?
-- §5.1: comfortable with deferring the exact brightness-ratio formula to its own `PHYSICS.md`
-  step (as Phase 1 did for holonomy), rather than trying to nail it down in this doc?
+- **§3 — resolved 2026-07-22.** Confirmed with the user: extract `stepThroughNearestPortal` as a
+  shared low-level primitive (§3's proposed resolution), not a pluggable-scene-intersector
+  generalization of `traverse()` itself. Rationale discussed with the user: keeps
+  throughput/depth-limit bookkeeping (rendering concerns) out of the manifold core, `traverse()`
+  changes are a pure refactor (Phase 1 tests pass unmodified), and a type-erased intersector on
+  `traverse()`'s hot path would cost real overhead for a function called per-ray, per-hop. Traded
+  off against: this is not literally "the same top-level function" render/physics both call, so
+  future divergence is a discipline risk, not a compiler-enforced one — worth revisiting if a
+  third consumer (Phase 5 XPBD contacts) shows the shared primitive isn't enough.
+- §1: proceeding with the Embree-first-then-lighter-Vulkan-checkpoint sequencing as proposed — low
+  cost either way, and this doc's own leaning is the safe default. Will still raise the Vulkan
+  checkpoint explicitly at §7 step 6 as planned.
+- §5.1: **resolved 2026-07-22.** See `docs/PHYSICS.md` §2 and the correction above — the honest
+  formula is an exact inverse-square power law, not the constant-ratio framing originally
+  guessed at here.
+- **Resolved 2026-07-23.** The ASan/UBSan gate's inability to load a test binary linking
+  `render_core`'s Embree path is a genuine toolchain/allocator mismatch (Embree/TBB's vcpkg
+  binaries built with a plain, non-ASan-instrumented MSVC toolset, vs. the clang-cl+ASan host
+  process), confirmed on a fully fresh rebuild (not a stale-link artifact) by running the
+  Embree-linked test binary directly and reproducing the same bad-free. Resolved per option (c):
+  scope the sanitizer gate to first-party code, deferring only the Embree-invoking test to
+  `msvc-debug`. See `docs/DECISIONS.md` #0005 for the full writeup, alternatives considered, and
+  why (a) static triplet and (b) suppression were rejected.
+- **Resolved 2026-07-23.** `vulkaninfo` confirms this machine's RTX 4080 SUPER (driver 595.79)
+  supports `VK_KHR_ray_tracing_pipeline` + `VK_KHR_ray_query`; criterion 3 is achievable here.

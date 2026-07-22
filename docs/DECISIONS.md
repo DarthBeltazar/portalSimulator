@@ -143,3 +143,61 @@ silently stopped applying — see the environment-scoping note below).
 
 **Verification.** Both presets now produce clean configure-from-scratch + build + `ctest` runs
 (7/7 tests passing on each) after deleting and fully rebuilding both `cmake-build-*` trees.
+
+## 0005 — Scoping the `clang-cl-sanitize` gate away from Embree/TBB-linked binaries
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** Phase 2's Embree renderer (`render_core`) links `embree4.lib`/`tbb12.lib`, prebuilt
+by vcpkg with a plain (non-ASan-instrumented) MSVC toolset. Any Catch2 binary that actually
+invokes the Embree runtime (creates an `RTCDevice`/`RTCScene` — i.e. `render_tests_embree`,
+covering `test_shadow_through_portal.cpp`) aborts under `clang-cl-sanitize` with
+`AddressSanitizer: attempting free on address which was not malloc()-ed` during TBB/CRT static
+teardown, before any `TEST_CASE` body runs — even `--list-tests` discovery crashes. Verified
+empirically on a fully fresh `cmake-build-clang-cl-sanitize` tree (deleted and reconfigured from
+scratch, ruling out a stale/incremental-link artifact) by running the built exe directly: the
+bad-free reproduces exactly, in frames consistent with the ASan-instrumented host process and
+Embree/TBB's plain-CRT-allocated objects disagreeing about which allocator owns a given block at
+teardown — a toolchain/allocator mismatch between instrumented and non-instrumented binaries in
+the same process, not a bug in `render_core`'s own logic (confirmed separately by the shadow
+test's negative control: reverting `docs/PHYSICS.md` §3's method-of-images fix makes
+`test_shadow_through_portal.cpp` fail under `msvc-debug`, so the pass there is load-bearing, not
+vacuous).
+
+**Decision.** Split `tests/render`'s single Catch2 binary into two targets
+(`tests/render/CMakeLists.txt`):
+- `render_tests` — `test_corridor_brightness.cpp`, `test_corridor_render.cpp`. Neither calls
+  `render::Scene`/`renderEmbree` (`test_corridor_render.cpp` only needs `render::Camera`, which
+  has no Embree dependency), so the linker doesn't pull `scene.cpp.obj`/`renderer.cpp.obj` from
+  `render_core.lib`, and the binary never loads `embree4.dll`/`tbb12.dll`. Registered with
+  `catch_discover_tests` under every preset.
+- `render_tests_embree` — `test_shadow_through_portal.cpp`, the one test that drives
+  `renderEmbree` end to end. Built under every preset (still compile-checked, and still exercises
+  `manifold_core` + `render_core`'s own logic when run), but `catch_discover_tests` — which
+  invokes the binary to enumerate tests — is only called when `NOT PORTAL_SIM_ASAN_ACTIVE`
+  (a variable set once in the root `CMakeLists.txt`, next to `copy_asan_runtime_dll`'s identical
+  condition). So it runs under `ctest --preset msvc-debug` but is never invoked — not even for
+  discovery — under `clang-cl-sanitize`.
+
+This keeps first-party code (`manifold_core`, `render_core`'s `camera.cpp`, and by extension
+`scene.cpp`/`renderer.cpp`'s logic as exercised by `render_tests_embree` under `msvc-debug`) under
+real ASan/UBSan coverage where the toolchain allows it, and scopes the *gate itself* — the thing
+CLAUDE.md requires green before a phase merges — away from a binary whose crash is a documented
+toolchain limitation, not a first-party memory bug. Rejected alternatives (see
+`docs/phase2-rendering.md` §7 open questions before this entry): a static vcpkg triplet
+(`x64-windows-static`) — doesn't recompile Embree/TBB under ASan, just relocates the same
+allocator mismatch, and conflicts with the `MultiThreadedDLL` + dynamic-ASan-runtime setup
+decision #0003 already depends on; suppressing the specific failure — ASan suppression files only
+cover categories like `leak`/`interceptor_via_lib`/`vptr_check`, not `bad-free`, so this would
+require `halt_on_error=0` globally, which guts the gate rather than scoping it.
+
+**Revisit if:** a static triplet is tried later and actually resolves the allocator mismatch (not
+just relocates it), or a future Embree/vcpkg upgrade ships ASan-instrumented binaries.
+
+**Verification.** Fresh configure + build + `ctest` on both presets after this change: 19/19 pass
+under `msvc-debug` (all tests, both executables); 17/17 pass under `clang-cl-sanitize`
+(`manifold_tests`'s 12 plus `render_tests`'s 5 corridor tests — `render_tests_embree`'s 2 are
+correctly not discovered). Running `render_tests_embree.exe` directly under
+`clang-cl-sanitize` still reproduces the bad-free, confirming the scoping is hiding a documented
+toolchain gap, not masking a since-fixed problem.

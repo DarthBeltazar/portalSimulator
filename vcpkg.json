@@ -5,6 +5,7 @@
   "dependencies": [
     "eigen3",
     "catch2",
-    "rapidcheck"
+    "rapidcheck",
+    "embree"
   ]
 }

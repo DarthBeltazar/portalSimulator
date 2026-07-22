@@ -47,6 +47,26 @@ struct DiskHit {
 DiskHit intersectPortal(const Eigen::Vector3d& origin, const Eigen::Vector3d& direction,
                          const Portal& portal, double max_distance);
 
+// The one place portal-crossing math lives, shared by traverse() (below) and the renderer's
+// ray loop (src/render), per docs/phase2-rendering.md §3: finds the nearest portal crossing
+// among `portals` within `max_distance`, and — if one exists — advances the ray to the hit
+// point and applies the transition transform. traverse() is a thin loop over this; the
+// renderer additionally compares the crossing distance against its own scene-geometry
+// intersection and owns its own depth/throughput bookkeeping, which are rendering concerns
+// this function knows nothing about (CLAUDE.md's manifold-core contract: portal semantics
+// live here, not radiometry).
+struct PortalHopResult {
+    bool crossed = false;
+    double distanceToHit = 0.0;       // only meaningful if crossed
+    Eigen::Vector3d newOrigin;
+    Eigen::Vector3d newDirection;
+    SE3 hopTransform = SE3::identity(); // transformAtoB() or transformBtoA(), whichever fired
+};
+PortalHopResult stepThroughNearestPortal(const Eigen::Vector3d& origin,
+                                          const Eigen::Vector3d& direction,
+                                          const std::vector<Portal>& portals,
+                                          double max_distance);
+
 namespace detail {
 // Chart-erased implementation, defined in traverse.cpp. The public `traverse()` template
 // below is a thin, header-only wrapper that unwraps the statically-tagged Ray into raw
