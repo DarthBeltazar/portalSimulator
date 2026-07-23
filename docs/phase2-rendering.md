@@ -1,7 +1,7 @@
 # Phase 2 — Rendering: design doc
 
-Status: **Phase 2a (Embree) merge-ready (2026-07-23)**; Vulkan RT (§7 step 8) underway. All open
-questions below are resolved.
+Status: **Phase 2 complete (2026-07-23)** — Phase 2a (Embree) merge-ready, Vulkan RT (§7 step 8)
+done, all three acceptance criteria (§6) met. All open questions below are resolved.
 
 ## 1. Scope
 
@@ -249,10 +249,36 @@ enough, and `/src/geometry/` is explicitly a later-phase (rim cutting, Phase 5) 
      to one mesh / no portal integration — combining scene-geometry ray queries with the
      portal-hop loop into the full-scene shader is the next step. Green under both presets (128
      assertions / 10 test cases each), clean under Vulkan validation and clang-cl ASan/UBSan.
-   - **Remaining:** the full-scene compute shader (portal-hop loop + scene-geometry ray query,
-     whichever nearer, per §3/§4's "same as the Embree path's control flow"), `render::Camera`
-     GPU dispatch producing a full image, the GPU-vs-Embree RMSE comparison (§5.3/DECISIONS.md
-     #0008), criterion 3's acceptance test, final Phase 2 report.
+   - **Done (2026-07-23).** The full-scene compute shader: `src/render/shaders/full_scene.slang`
+     (`sm_6_5` + `portal_common.slangh`, the one shader needing both) combines the portal-hop loop
+     with an inline `RayQuery<>` against the scene TLAS, "whichever nearer" at every hop, and
+     ports `renderer.cpp`'s `traceRay`/`isOccluded`/`shade` term-for-term (§3/§4). Geometric
+     normals (which `RayQuery` doesn't hand back) are reconstructed from the committed triangle's
+     three vertices, read out of the *same* vertex/index buffers `AccelerationStructure` was built
+     from (`acceleration_structure.{hpp,cpp}` now expose them, and their usage flags gained
+     `STORAGE_BUFFER_BIT` for this) — one upload, not a second copy of the mesh. `render::Scene`
+     gained a `meshes()` accessor (`TriangleMesh` moved to its own header, `triangle_mesh.hpp`, so
+     `render_vulkan` can depend on the mesh shape without pulling in Embree's headers — keeps
+     DECISIONS.md #0005's ASan-gate scoping intact). `render::renderVulkan`
+     (`full_scene_gpu.{hpp,cpp}`) dispatches one ray per pixel (directions from
+     `Camera::rayDirectionForPixel`, computed CPU-side and uploaded — not re-derived in-shader) and
+     returns a `render::Image`, the same shape `renderEmbree` returns.
+   - **Done (2026-07-23).** GPU-vs-Embree RMSE comparison and criterion 3's acceptance test
+     (`tests/render/test_gpu_vs_embree.cpp`, scoped like `render_tests_embree` per DECISIONS.md
+     #0005 — links both `render_core` and `render_vulkan`, built under every preset but discovered
+     by `ctest` only under `msvc-debug`; confirmed it reproduces the identical documented
+     Embree/TBB ASan-teardown bad-free when run directly under `clang-cl-sanitize`, same
+     verification discipline as #0005's own check). Renders the shadow-through-portal acceptance
+     scene through both backends: RMSE = 0.0179, residual concentrated in a 35/4096-pixel (0.85%)
+     shadow-boundary fringe, not a systematic error — see DECISIONS.md #0008's measurement writeup
+     for the full analysis and the two gates (whole-image RMSE and boundary-fringe pixel count)
+     this sets. Green under both presets (25/25 assertions under `msvc-debug`, 22/22 under
+     `clang-cl-sanitize` with the Embree-linked binary correctly excluded from discovery).
+   - **Phase 2 (Vulkan RT sub-step) complete.** All three acceptance criteria (§6) are met:
+     corridor brightness progression (criterion 1, Phase 2a/Embree), shadow through a portal
+     (criterion 2, Phase 2a/Embree), and GPU-vs-Embree image match (criterion 3, this step).
+     Remaining for a full Phase 2 report: none — this doc's own progress log above *is* the
+     report; no further write-up is planned unless requested.
 
 ## Open questions for the user
 

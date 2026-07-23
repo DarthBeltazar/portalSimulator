@@ -9,6 +9,8 @@
 #include "manifold/portal.hpp"
 #include "manifold/se3.hpp"
 
+#include "light.hpp"
+
 // CPU-side mirrors of src/render/shaders/portal_hop.slang's buffer structs, byte-for-byte. Not
 // derived from a shared layout description — hand-matched against slangc's reflection JSON and
 // spirv-dis's ArrayStride decorations for that exact shader (docs/DECISIONS.md #0007), then
@@ -139,5 +141,42 @@ inline Ray toGpuRay(const Eigen::Vector3d& origin, const Eigen::Vector3d& direct
     writeVec3(result.direction, direction);
     return result;
 }
+
+// Mirrors src/render/shaders/full_scene.slang's GpuLight -- same "two float3 fields, each padded
+// to 16 bytes" layout as Ray/Transform above (std430-style, per this file's header comment).
+struct Light {
+    float position[3];
+    float _pad0[1];
+    float radiantIntensity[3];
+    float _pad1[1];
+};
+static_assert(sizeof(Light) == 32);
+static_assert(offsetof(Light, position) == 0);
+static_assert(offsetof(Light, radiantIntensity) == 16);
+
+inline Light toGpuLight(const render::PointLight& light) {
+    Light result{};
+    writeVec3(result.position, light.position);
+    writeVec3(result.radiantIntensity, light.radiantIntensity);
+    return result;
+}
+
+inline std::vector<Light> toGpuLights(const std::vector<render::PointLight>& lights) {
+    std::vector<Light> result;
+    result.reserve(lights.size());
+    for (const render::PointLight& light : lights) {
+        result.push_back(toGpuLight(light));
+    }
+    return result;
+}
+
+// Mirrors src/render/shaders/full_scene.slang's GpuRadiance output struct: a single float3,
+// padded to std430's 16-byte rule the same way every other float3-bearing struct in this file is.
+struct RadianceOut {
+    float radiance[3];
+    float _pad0[1];
+};
+static_assert(sizeof(RadianceOut) == 16);
+static_assert(offsetof(RadianceOut, radiance) == 0);
 
 } // namespace render::gpu

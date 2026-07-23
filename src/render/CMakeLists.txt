@@ -18,6 +18,7 @@ add_library(render_vulkan STATIC
     portal_traverse_gpu.cpp
     acceleration_structure.cpp
     triangle_query_gpu.cpp
+    full_scene_gpu.cpp
 )
 target_include_directories(render_vulkan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(render_vulkan PUBLIC
@@ -55,3 +56,13 @@ compile_slang_shader(${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_query.slang ma
 add_custom_target(triangle_query_shader DEPENDS ${TRIANGLE_QUERY_SPV})
 add_dependencies(render_vulkan triangle_query_shader)
 target_compile_definitions(render_vulkan PUBLIC TRIANGLE_QUERY_SPV_PATH="${TRIANGLE_QUERY_SPV}")
+
+# full_scene.slang (docs/phase2-rendering.md §7 step 8's remaining bullet): the full-scene shader
+# combining the portal-hop loop with scene-geometry ray query -- the one shader needing both
+# sm_6_5 (RayQuery<>, DECISIONS.md #0007) and portal_common.slangh (DECISIONS.md #0006/#0007's
+# shared disk-crossing math), so unlike triangle_query.slang above it takes the common-header
+# dependency too.
+compile_slang_shader(${CMAKE_CURRENT_SOURCE_DIR}/shaders/full_scene.slang main sm_6_5 FULL_SCENE_SPV ${PORTAL_SHADER_COMMON})
+add_custom_target(full_scene_shader DEPENDS ${FULL_SCENE_SPV})
+add_dependencies(render_vulkan full_scene_shader)
+target_compile_definitions(render_vulkan PUBLIC FULL_SCENE_SPV_PATH="${FULL_SCENE_SPV}")

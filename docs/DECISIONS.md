@@ -309,3 +309,24 @@ compute whole-image RMSE, and inspect where the residual concentrates.
 
 This entry will be updated with the concrete threshold and its justification once criterion 3's
 implementation produces a first image pair.
+
+**Measured (2026-07-23), `tests/render/test_gpu_vs_embree.cpp`.** First real image pair: the
+shadow-through-portal acceptance scene (§5.2/`test_shadow_through_portal.cpp`'s portal + occluder
++ receiver + point light), 64×64, rendered once by `renderEmbree` and once by `renderVulkan`
+(`full_scene.slang`). Whole-image RMSE = **0.0179**. Residual distribution: every pixel with error
+above 0.01 is also above 0.1 — bimodal, no gradation between "matches almost exactly" and "hard
+disagreement" — and only **35 of 4096 pixels (0.85%)** fall in the disagreeing bucket. The
+single worst pixel (error 0.343) is at the shadow boundary: Embree reports it shadowed (radiance
+0), the GPU reports it lit (radiance ≈0.198) — exactly the "BVH resolves a grazing/boundary ray
+differently by ~1 ULP" case this entry's Context section anticipated, not a broad/systematic
+shading or transform error (a wrong light-image transform, e.g., the bug `PHYSICS.md` §3's fix
+corrects, moves *every* lit pixel's radiance, not a 0.85% edge fringe).
+
+**Decision (threshold).** Two gates, both in `test_gpu_vs_embree.cpp`, each with ~2-3x margin over
+the measured values for cross-run/cross-machine floating-point variance while staying far tighter
+than what a real regression would produce:
+- Whole-image RMSE `< 0.05` (measured 0.0179).
+- Pixel count with per-pixel error `> 0.1` (the boundary-fringe bucket) `<= 100` (measured 35).
+
+Revisit if a future scene/resolution change moves the fringe size enough to need re-measuring, or
+if a genuine shading/transform bug is later caught by this gate and the margin needs tightening.

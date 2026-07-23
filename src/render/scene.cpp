@@ -39,6 +39,8 @@ void Scene::addTriangleMesh(const TriangleMesh& mesh) {
     rtcCommitGeometry(geometry);
     rtcAttachGeometry(scene_, geometry);
     rtcReleaseGeometry(geometry); // the scene now owns the only remaining reference
+
+    meshes_.push_back(mesh);
 }
 
 void Scene::addPortal(manifold::Portal portal) { portals_.push_back(std::move(portal)); }

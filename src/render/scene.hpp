@@ -1,7 +1,5 @@
 #pragma once
 
-#include <array>
-#include <cstdint>
 #include <vector>
 
 #include <Eigen/Core>
@@ -10,6 +8,7 @@
 #include "manifold/portal.hpp"
 
 #include "light.hpp"
+#include "triangle_mesh.hpp"
 
 // The Embree-backed scene: triangle meshes (Embree's native geometry type) + portals (reused
 // from manifold core, no redefinition — CLAUDE.md's manifold-core contract) + point lights.
@@ -18,11 +17,6 @@
 // Catch2 acceptance tests (step 4).
 
 namespace render {
-
-struct TriangleMesh {
-    std::vector<Eigen::Vector3d> vertices;
-    std::vector<std::array<std::uint32_t, 3>> triangles;
-};
 
 class Scene {
 public:
@@ -42,6 +36,10 @@ public:
 
     const std::vector<manifold::Portal>& portals() const { return portals_; }
     const std::vector<PointLight>& lights() const { return lights_; }
+    // Retained alongside the Embree geometry they were built from -- the Vulkan RT full-scene
+    // path (full_scene_gpu.cpp) reads this to build its own acceleration structure from the same
+    // Scene, so both backends render identical geometry (docs/phase2-rendering.md §7 step 8).
+    const std::vector<TriangleMesh>& meshes() const { return meshes_; }
     RTCScene handle() const { return scene_; }
 
 private:
@@ -49,6 +47,7 @@ private:
     RTCScene scene_ = nullptr;
     std::vector<manifold::Portal> portals_;
     std::vector<PointLight> lights_;
+    std::vector<TriangleMesh> meshes_;
 };
 
 } // namespace render

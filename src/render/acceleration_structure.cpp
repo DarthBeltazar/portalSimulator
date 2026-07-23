@@ -88,9 +88,12 @@ AccelerationStructure::AccelerationStructure(VulkanContext& context, const Trian
     // --- Geometry input buffers (vertex/index): host-visible + mapped is enough for this
     // one-shot, small-mesh path (same "not a fast path" discipline as the other *_gpu.cpp files)
     // -- ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR + SHADER_DEVICE_ADDRESS_BIT are the
-    // two usage flags the AS build actually requires of them.
+    // two usage flags the AS build itself requires. STORAGE_BUFFER_BIT is added so the full-scene
+    // shader (docs/phase2-rendering.md §7 step 8) can bind these same buffers directly for normal
+    // reconstruction (vertexBuffer()/indexBuffer() below) instead of uploading the mesh twice.
     constexpr VkBufferUsageFlags kGeometryInputUsage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                                                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+                                                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
     void* mappedVertices = nullptr;
     createBuffer(allocator, sizeof(Eigen::Vector3f) * vertexCount, kGeometryInputUsage, true, vertexBuffer_.buffer,

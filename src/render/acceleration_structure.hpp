@@ -40,6 +40,15 @@ public:
 
     VkAccelerationStructureKHR tlas() const { return tlas_; }
 
+    // Exposed for the full-scene shader's normal reconstruction (docs/phase2-rendering.md §7 step
+    // 8): RayQuery doesn't hand back a hit normal, so the shader reads these same buffers -- the
+    // exact ones the AS was built from, not a second upload -- to fetch the committed triangle's
+    // three vertices and compute a flat geometric normal itself. Tightly packed (vertexStride ==
+    // sizeof(Eigen::Vector3f), index stride == sizeof(uint32_t)*3), so a shader-side
+    // StructuredBuffer<float>/<uint> binding addresses the same bytes unambiguously.
+    VkBuffer vertexBuffer() const { return vertexBuffer_.buffer; }
+    VkBuffer indexBuffer() const { return indexBuffer_.buffer; }
+
 private:
     struct Buffer {
         VkBuffer buffer = VK_NULL_HANDLE;
