@@ -15,4 +15,15 @@ TEST_CASE("VulkanContext creates and tears down a headless instance/device/queue
     REQUIRE(context.device() != VK_NULL_HANDLE);
     REQUIRE(context.computeQueue() != VK_NULL_HANDLE);
     REQUIRE(context.allocator() != nullptr);
+
+    // Device selection succeeding proves vk-bootstrap negotiated VK_KHR_acceleration_structure/
+    // VK_KHR_ray_query against this GPU (it fails selection otherwise) — but that alone doesn't
+    // prove the entry points are actually callable. volkLoadDevice() populates these globals with
+    // real driver function pointers only when the extension was truly enabled on the device; a
+    // null here would mean "selection silently accepted a feature struct that didn't take."
+    REQUIRE(vkCreateAccelerationStructureKHR != nullptr);
+    REQUIRE(vkGetAccelerationStructureBuildSizesKHR != nullptr);
+    REQUIRE(vkCmdBuildAccelerationStructuresKHR != nullptr);
+    REQUIRE(vkGetAccelerationStructureDeviceAddressKHR != nullptr);
+    REQUIRE(vkDestroyAccelerationStructureKHR != nullptr);
 }

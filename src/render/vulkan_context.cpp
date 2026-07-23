@@ -35,10 +35,37 @@ VulkanContext::VulkanContext() {
     // project depends on volk rather than linking the Vulkan loader's exported symbols directly.
     volkLoadInstanceOnly(instance_);
 
+    // Ray query + acceleration structures (docs/phase2-rendering.md §7 step 8, DECISIONS.md
+    // #0007): required now, at device creation, rather than deferred to whichever code path
+    // first builds a BLAS/TLAS — vk-bootstrap negotiates these against the physical device up
+    // front, and VK_KHR_acceleration_structure itself depends on VK_KHR_deferred_host_operations
+    // plus buffer_device_address (core since Vulkan 1.2, enabled via the 1.2 feature struct).
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
+    accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    accelerationStructureFeatures.accelerationStructure = VK_TRUE;
+
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.rayQuery = VK_TRUE;
+
+    VkPhysicalDeviceVulkan12Features features12{};
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    features12.bufferDeviceAddress = VK_TRUE;
+
     vkb::PhysicalDeviceSelector selector(vkbInstance);
-    auto physicalDeviceResult = selector.set_minimum_version(1, 3).require_present(false).select();
+    auto physicalDeviceResult = selector.set_minimum_version(1, 3)
+                                    .require_present(false)
+                                    .add_required_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
+                                    .add_required_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME)
+                                    .add_required_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)
+                                    .add_required_extension_features(accelerationStructureFeatures)
+                                    .add_required_extension_features(rayQueryFeatures)
+                                    .set_required_features_12(features12)
+                                    .select();
     if (!physicalDeviceResult) {
-        throwVkbError("Vulkan physical device selection failed", physicalDeviceResult.full_error());
+        throwVkbError("Vulkan physical device selection failed (this GPU/driver may lack ray "
+                      "query/acceleration structure support — vulkaninfo should be checked first)",
+                      physicalDeviceResult.full_error());
     }
     vkb::PhysicalDevice vkbPhysicalDevice = physicalDeviceResult.value();
     physicalDevice_ = vkbPhysicalDevice.physical_device;
@@ -70,6 +97,10 @@ VulkanContext::VulkanContext() {
     allocatorInfo.instance = instance_;
     allocatorInfo.pVulkanFunctions = &vmaFunctions;
     allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+    // Acceleration-structure geometry buffers (vertex/index/scratch, later in docs/phase2-
+    // rendering.md §7 step 8) need VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT — VMA requires this
+    // flag on the allocator itself before it will allocate such buffers correctly.
+    allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     if (vmaCreateAllocator(&allocatorInfo, &allocator_) != VK_SUCCESS) {
         throw std::runtime_error("VMA allocator creation failed");
     }
