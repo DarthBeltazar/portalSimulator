@@ -48,6 +48,13 @@ cbuffer PushConstants
     uint portalCount;
     uint lightCount;
     uint rayCount;
+    uint _pad0;
+    // Accumulated SE3 mapping the home chart into whatever chart the *camera* itself currently
+    // sits in (docs/DECISIONS.md #0013's follow-up) -- identity for a camera that never crossed a
+    // portal. traceRayFullScene's `accumulated` starts here instead of always at identity, so a
+    // ray with zero hops of its own still gets the light's correct image in the camera's chart.
+    float4 cameraChartRotation;
+    float3 cameraChartTranslation;
 };
 
 // Mirrors render::constants (src/render/constants.hpp) -- duplicated here because a Slang shader
@@ -56,9 +63,26 @@ cbuffer PushConstants
 static const uint kMaxPortalHops = 16;
 static const float kMinThroughput = 1e-4;
 static const float kDefaultAlbedo = 0.8;
-static const float kSelfIntersectionEpsilon = 1e-6;
 static const float kUnboundedDistance = 3.0e38;
 static const float kPi = 3.14159265358979323846;
+
+// Self-intersection avoidance: a fixed TMin for RayQuery (the parametric minimum), and a
+// position-adaptive offset for shadow ray origins. The CPU path uses a tiny fixed epsilon (1e-6)
+// which works in double precision; on GPU with float32, a fixed epsilon fails for hit points far
+// from origin where the ULP exceeds the offset. offsetOrigin() below computes a safe spawn point
+// by scaling the offset with the position's magnitude -- the standard GPU ray tracing practice
+// (Ray Tracing Gems, Ch. 6). The fixed TMin (used in RayQuery) stays at 1e-4 as a floor.
+static const float kRayTMin = 1e-4;
+
+// Compute a spawn point safely off the surface at `hitPoint` along `normal`. The offset scales
+// with max(|hitPoint|) so that at large coordinates (where float32 has coarser ULP) we still
+// clear the surface, while near the origin we use a minimum floor of kRayTMin.
+float3 offsetOrigin(float3 hitPoint, float3 normal)
+{
+    float maxCoord = max(abs(hitPoint.x), max(abs(hitPoint.y), abs(hitPoint.z)));
+    float offset = max(kRayTMin, maxCoord * 5e-4);
+    return hitPoint + offset * normal;
+}
 
 float3 fetchVertex(uint index)
 {
@@ -71,7 +95,7 @@ struct GeometryHit {
     float3 normal; // flat triangle normal, NOT yet front-faced against the incoming ray
 };
 
-// Queries gScene for the nearest opaque triangle within [kSelfIntersectionEpsilon, tMax] along
+// Queries gScene for the nearest opaque triangle within [kRayTMin, tMax] along
 // (origin, direction). Mirrors renderer.cpp's rtcIntersect1 call: the caller derives tMax as the
 // nearer of "next portal crossing" / "remaining distance budget", exactly like the CPU path caps
 // Embree's ray.tfar.
@@ -80,7 +104,7 @@ GeometryHit queryGeometry(float3 origin, float3 direction, float tMax)
     RayDesc rayDesc;
     rayDesc.Origin = origin;
     rayDesc.Direction = direction;
-    rayDesc.TMin = kSelfIntersectionEpsilon;
+    rayDesc.TMin = kRayTMin;
     rayDesc.TMax = tMax;
 
     // All geometry is built VK_GEOMETRY_OPAQUE_BIT_KHR (acceleration_structure.cpp), so Proceed()
@@ -114,6 +138,10 @@ bool isOccluded(float3 origin, float3 direction, float totalDistance)
 {
     float remaining = totalDistance;
     for (uint hop = 0; hop < kMaxPortalHops; ++hop) {
+        // Renormalize direction each hop to counter float32 quaternion-rotation drift that would
+        // otherwise skew distance comparisons and make some pixels see phantom occlusion.
+        direction = normalize(direction);
+
         HopStep step = stepThroughNearestPortalGpu(origin, direction, gPortals, portalCount, remaining);
         float queryFar = step.crossed ? step.distanceToHit : remaining;
 
@@ -127,7 +155,7 @@ bool isOccluded(float3 origin, float3 direction, float totalDistance)
 
         remaining -= step.distanceToHit;
         origin = step.newOrigin;
-        direction = step.newDirection; // hopTransform is a rotation+translation: direction stays unit
+        direction = step.newDirection;
     }
     return true; // exhausted the hop budget without resolving visibility -- treat as blocked
 }
@@ -147,7 +175,7 @@ float3 shade(float3 hitPoint, float3 normal, float3 incomingDirection, GpuTransf
         float3 lightImage = quatRotate(accumulated.rotation, gLights[i].position) + accumulated.translation;
         float3 toLight = lightImage - hitPoint;
         float distance = length(toLight);
-        if (distance < kSelfIntersectionEpsilon) {
+        if (distance < kRayTMin) {
             continue;
         }
         float3 lightDir = toLight / distance;
@@ -157,8 +185,15 @@ float3 shade(float3 hitPoint, float3 normal, float3 incomingDirection, GpuTransf
             continue;
         }
 
-        float3 shadingPoint = hitPoint + kSelfIntersectionEpsilon * normal;
-        if (isOccluded(shadingPoint, lightDir, distance - kSelfIntersectionEpsilon)) {
+        // Spawn the shadow ray safely off the hit surface using the adaptive offset, so that at
+        // large coordinates (where float32 ULP > fixed epsilon) we don't self-intersect the
+        // emitting triangle. The shadow distance is shortened correspondingly.
+        float3 shadingPoint = offsetOrigin(hitPoint, normal);
+        float shadowDistance = distance - length(shadingPoint - hitPoint);
+        if (shadowDistance <= kRayTMin) {
+            continue;
+        }
+        if (isOccluded(shadingPoint, lightDir, shadowDistance)) {
             continue;
         }
 
@@ -176,18 +211,23 @@ float3 shade(float3 hitPoint, float3 normal, float3 incomingDirection, GpuTransf
 float3 traceRayFullScene(float3 origin, float3 direction)
 {
     GpuTransform accumulated;
-    accumulated.rotation = float4(0, 0, 0, 1);
-    accumulated.translation = float3(0, 0, 0);
+    accumulated.rotation = cameraChartRotation;
+    accumulated.translation = cameraChartTranslation;
 
     float throughput = 1.0;
     for (uint hop = 0; hop < kMaxPortalHops && throughput >= kMinThroughput; ++hop) {
+        // Renormalize direction each hop to counter float32 quaternion-rotation length drift --
+        // without this, directions gradually shorten/lengthen over multiple hops, skewing
+        // parametric distance comparisons and producing sporadic bright/dark pixel noise.
+        direction = normalize(direction);
+
         HopStep step = stepThroughNearestPortalGpu(origin, direction, gPortals, portalCount, kUnboundedDistance);
         float queryFar = step.crossed ? step.distanceToHit : kUnboundedDistance;
 
         GeometryHit geomHit = queryGeometry(origin, direction, queryFar);
         if (geomHit.hit) {
             float3 hitPoint = origin + geomHit.t * direction;
-            return throughput * shade(hitPoint, normalize(geomHit.normal), normalize(direction), accumulated);
+            return throughput * shade(hitPoint, normalize(geomHit.normal), direction, accumulated);
         }
 
         if (!step.crossed) {

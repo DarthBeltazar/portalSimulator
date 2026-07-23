@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "acceleration_structure.hpp"
+#include "gpu_dispatch_common.hpp"
 #include "gpu_portal.hpp"
 
 #ifndef FULL_SCENE_SPV_PATH
@@ -17,92 +18,21 @@
 // portal_hop_gpu.cpp/triangle_query_gpu.cpp (see those files' header comments), extended with the
 // extra descriptor kinds this shader needs: the AS's own vertex/index buffers (reused, not
 // re-uploaded -- see acceleration_structure.hpp), a lights buffer, and one ray per output pixel.
+// checkVk/readSpirv/MappedBuffer/createHostVisibleBuffer/mergeMeshes live in gpu_dispatch_common.*,
+// shared with persistent_gpu_renderer.cpp (docs/DECISIONS.md #0011).
 
 namespace render {
 
-namespace {
-
-// Mirrors src/render/shaders/full_scene.slang's GpuRadiance -- a single float3, padded to
-// std430's 16-byte rule the same way every other float3-bearing struct in this project is
-// (gpu_portal.hpp's Ray/Transform/Light structs, hand-matched against slangc's reflection).
-struct GpuRadianceOut {
-    float radiance[3];
-    float _pad0[1];
-};
-static_assert(sizeof(GpuRadianceOut) == 16);
-static_assert(offsetof(GpuRadianceOut, radiance) == 0);
-
-std::vector<char> readSpirv(const char* path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        throw std::runtime_error(std::string("Cannot open compiled shader: ") + path);
-    }
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<char> buffer(static_cast<std::size_t>(size));
-    if (!file.read(buffer.data(), size)) {
-        throw std::runtime_error(std::string("Failed reading compiled shader: ") + path);
-    }
-    return buffer;
-}
-
-void checkVk(VkResult result, const char* what) {
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error(std::string(what) + " failed: VkResult " + std::to_string(result));
-    }
-}
-
-struct MappedBuffer {
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VmaAllocation allocation = VK_NULL_HANDLE;
-    void* mapped = nullptr;
-};
-
-MappedBuffer createHostVisibleBuffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags usage) {
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = size;
-    bufferInfo.usage = usage;
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    VmaAllocationCreateInfo allocInfo{};
-    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-    allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-
-    MappedBuffer result;
-    VmaAllocationInfo allocationInfo{};
-    checkVk(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &result.buffer, &result.allocation, &allocationInfo),
-            "vmaCreateBuffer");
-    result.mapped = allocationInfo.pMappedData;
-    return result;
-}
-
-// Merges every input mesh into one triangle soup, offsetting each mesh's triangle indices by the
-// running vertex count. AccelerationStructure builds a single BLAS/geometry from one TriangleMeshF
-// -- and the shader's CommittedPrimitiveIndex() indexes directly into that one combined triangle
-// list -- so "one merged mesh" (not one BLAS instance per input TriangleMesh) is what keeps the AS
-// geometry and the shader's vertex/index buffers trivially addressable by the same index.
-TriangleMeshF mergeMeshes(const std::vector<TriangleMesh>& meshes) {
-    TriangleMeshF merged;
-    for (const TriangleMesh& mesh : meshes) {
-        const auto indexOffset = static_cast<std::uint32_t>(merged.vertices.size());
-        merged.vertices.reserve(merged.vertices.size() + mesh.vertices.size());
-        for (const Eigen::Vector3d& v : mesh.vertices) {
-            merged.vertices.push_back(v.cast<float>());
-        }
-        merged.triangles.reserve(merged.triangles.size() + mesh.triangles.size());
-        for (const std::array<std::uint32_t, 3>& tri : mesh.triangles) {
-            merged.triangles.push_back({tri[0] + indexOffset, tri[1] + indexOffset, tri[2] + indexOffset});
-        }
-    }
-    return merged;
-}
-
-} // namespace
+using detail::checkVk;
+using detail::createHostVisibleBuffer;
+using detail::createHostVisibleReadbackBuffer;
+using detail::MappedBuffer;
+using detail::mergeMeshes;
+using detail::readSpirv;
 
 Image renderVulkan(VulkanContext& context, const std::vector<manifold::Portal>& portals,
                     const std::vector<PointLight>& lights, const std::vector<TriangleMesh>& meshes,
-                    const Camera& camera) {
+                    const Camera& camera, const manifold::SE3& cameraChart) {
     if (portals.empty()) {
         throw std::invalid_argument("renderVulkan requires at least one portal");
     }
@@ -150,8 +80,8 @@ Image renderVulkan(VulkanContext& context, const std::vector<manifold::Portal>& 
         createHostVisibleBuffer(allocator, sizeof(gpu::Ray) * rayCount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     std::memcpy(raysBuffer.mapped, gpuRays.data(), sizeof(gpu::Ray) * rayCount);
 
-    MappedBuffer resultsBuffer =
-        createHostVisibleBuffer(allocator, sizeof(GpuRadianceOut) * rayCount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    MappedBuffer resultsBuffer = createHostVisibleReadbackBuffer(allocator, sizeof(gpu::RadianceOut) * rayCount,
+                                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
     std::vector<char> spirv = readSpirv(FULL_SCENE_SPV_PATH);
     VkShaderModuleCreateInfo shaderModuleInfo{};
@@ -180,15 +110,10 @@ Image renderVulkan(VulkanContext& context, const std::vector<manifold::Portal>& 
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     checkVk(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout), "vkCreateDescriptorSetLayout");
 
-    struct PushConstants {
-        std::uint32_t portalCount;
-        std::uint32_t lightCount;
-        std::uint32_t rayCount;
-    };
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(PushConstants);
+    pushRange.size = sizeof(gpu::FullScenePushConstants);
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -284,7 +209,8 @@ Image renderVulkan(VulkanContext& context, const std::vector<manifold::Portal>& 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0,
                              nullptr);
-    PushConstants pushConstants{portalCount, lightCount, rayCount};
+    gpu::FullScenePushConstants pushConstants =
+        gpu::toFullScenePushConstants(portalCount, lightCount, rayCount, cameraChart);
     vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants),
                         &pushConstants);
     const std::uint32_t groupCount = (rayCount + 63u) / 64u;
@@ -304,13 +230,13 @@ Image renderVulkan(VulkanContext& context, const std::vector<manifold::Portal>& 
     checkVk(vkQueueSubmit(context.computeQueue(), 1, &submitInfo, fence), "vkQueueSubmit");
     checkVk(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
 
-    std::vector<GpuRadianceOut> gpuResults(rayCount);
-    std::memcpy(gpuResults.data(), resultsBuffer.mapped, sizeof(GpuRadianceOut) * rayCount);
+    std::vector<gpu::RadianceOut> gpuResults(rayCount);
+    std::memcpy(gpuResults.data(), resultsBuffer.mapped, sizeof(gpu::RadianceOut) * rayCount);
 
     Image image(camera.imageWidth, camera.imageHeight);
     for (int y = 0; y < camera.imageHeight; ++y) {
         for (int x = 0; x < camera.imageWidth; ++x) {
-            const GpuRadianceOut& r = gpuResults[static_cast<std::size_t>(y) * camera.imageWidth + x];
+            const gpu::RadianceOut& r = gpuResults[static_cast<std::size_t>(y) * camera.imageWidth + x];
             image.at(x, y) = Eigen::Vector3d(r.radiance[0], r.radiance[1], r.radiance[2]);
         }
     }

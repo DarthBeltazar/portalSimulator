@@ -19,4 +19,14 @@ if(WIN32)
   target_link_libraries(interactive_viewer PRIVATE render_core manifold_core user32 gdi32)
 
   copy_asan_runtime_dll(interactive_viewer)
+
+  # GPU counterpart (docs/DECISIONS.md #0011): same window/input shell, dispatches
+  # render::PersistentGpuRenderer (Vulkan RT) per frame instead of render::renderEmbree.
+  add_executable(interactive_viewer_gpu
+      interactive_viewer_gpu.cpp
+      demo_scene_common.cpp
+  )
+  target_link_libraries(interactive_viewer_gpu PRIVATE render_core render_vulkan manifold_core user32 gdi32)
+
+  copy_asan_runtime_dll(interactive_viewer_gpu)
 endif()

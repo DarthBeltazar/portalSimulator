@@ -14,11 +14,13 @@ target_link_libraries(render_core PUBLIC manifold_core Eigen3::Eigen embree TBB:
 add_library(render_vulkan STATIC
     vulkan_context.cpp
     vma_impl.cpp
+    gpu_dispatch_common.cpp
     portal_hop_gpu.cpp
     portal_traverse_gpu.cpp
     acceleration_structure.cpp
     triangle_query_gpu.cpp
     full_scene_gpu.cpp
+    persistent_gpu_renderer.cpp
 )
 target_include_directories(render_vulkan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(render_vulkan PUBLIC
@@ -28,6 +30,7 @@ target_link_libraries(render_vulkan PUBLIC
     volk::volk
     GPUOpen::VulkanMemoryAllocator
     vk-bootstrap::vk-bootstrap
+    TBB::tbb
 )
 
 set(PORTAL_SHADER_COMMON ${CMAKE_CURRENT_SOURCE_DIR}/shaders/portal_common.slangh)

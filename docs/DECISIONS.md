@@ -430,3 +430,416 @@ surface (rather than "look at the render interactively") — at that point decis
 architecture and `full_scene_gpu.cpp`'s one-shot acceleration-structure rebuild both need
 reconsidering, and should get their own design doc first per the working protocol, not be
 retrofitted onto this tooling silently.
+
+## 0011 — Real-time GPU viewer: persistent Vulkan RT renderer, still headless (no swapchain)
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** #0010 named this exact gap: `full_scene_gpu.cpp`'s `renderVulkan` rebuilds its
+acceleration structure, pipeline, descriptor pool, and every buffer from scratch on every call —
+fine for a one-shot GPU-vs-Embree comparison image, unusable for a per-frame interactive loop. The
+user asked for a real-time GPU visualization, i.e. exactly the "not-yet-scoped engineering task"
+#0010 flagged. Same as #0010, this is `/tools/` tooling (`portal-sim-agent-prompt.md` §4's
+"визуализаторы" bucket), not a phase deliverable — logged here per that entry's own instruction to
+give this its own design note rather than retrofitting it in silently.
+
+**Decision.** Kept the scope deliberately narrow: make the *rendering* run on GPU, per frame,
+shown in a window — not build a product-grade swapchain-presented renderer (that stays the
+separate, larger task #0010 already walled off).
+
+- `src/render/gpu_dispatch_common.{hpp,cpp}`: `checkVk`/`readSpirv`/`MappedBuffer`/
+  `createHostVisibleBuffer`/`mergeMeshes`, pulled out of `full_scene_gpu.cpp` verbatim once a
+  second call site (below) needed the identical code — not a speculative abstraction.
+- `src/render/persistent_gpu_renderer.{hpp,cpp}`: a `PersistentGpuRenderer` class that builds the
+  acceleration structure, shader module, pipeline, descriptor set layout/pool, command pool, and
+  the portals/lights buffers exactly once (the scene is immutable for the object's lifetime — only
+  the camera changes between calls). Its `render(camera)` method re-fills and re-dispatches only
+  what depends on the camera or resolution each call: the rays buffer's contents every frame; the
+  rays/results buffers themselves (and their two descriptor bindings) only when resolution changes.
+  Command buffer is reset and re-recorded each call (its dispatch group count is tied to ray count,
+  so it can't simply be replayed across a resolution change) — cheap relative to the GPU dispatch
+  itself.
+- `tools/interactive_viewer_gpu.cpp`: same Win32 + GDI window, fly camera, and input handling as
+  `tools/interactive_viewer.cpp`, but calling `PersistentGpuRenderer::render` instead of
+  `render::renderEmbree`. Deliberately duplicated rather than factored into a shared shell with the
+  CPU viewer — that tool is already tested-by-use and green, and extracting a shared abstraction
+  for exactly two call sites risked regressing it for no measured benefit. Default resolution step
+  is the same middle step as the CPU viewer (400x300) — see the follow-up note below for why
+  top-of-ladder turned out not to be the fluid default it looked like on paper; `+`/`-` still step
+  the full ladder, including up to the full window resolution.
+- Still headless: no swapchain, no `VkSurfaceKHR`. `PersistentGpuRenderer::render` returns a
+  CPU-side `render::Image`, read back from the results buffer and blitted via `StretchDIBits` —
+  identical presentation path to the CPU viewer, just fed by a GPU dispatch instead of
+  `renderEmbree`. `VulkanContext` stays exactly what its header says (headless instance/device/
+  queue/allocator); building a real presentation surface is the "separate, larger task" #0010 named
+  and stays out of scope here too.
+
+**Why this doesn't compromise the phase-gated core.** No files under `/src/manifold`,
+`/src/physics`, or `/src/fields` were touched. `full_scene_gpu.cpp`'s public behavior is unchanged
+— its helpers were moved, not rewritten, and it now calls `gpu::RadianceOut` (already
+byte-identical to the local `GpuRadianceOut` it previously defined, per `gpu_portal.hpp`'s own
+static_asserts) instead of redefining an identical struct.
+
+**Revisit if:** a later phase wants a real interactive product surface — at that point, per #0010,
+build a real swapchain/presentation path instead of extending the CPU-readback approach further.
+
+**Follow-up (same day): black screen and slow fps, investigated with temporary `std::chrono`
+instrumentation in `render()` (added, measured, then removed — not left in the shipped code).**
+
+- Binding-index bug (the black screen): the constructor's static descriptor writes already occupy
+  bindings 0-4 (AS, vertex, index, portals, lights — matching `full_scene_gpu.cpp`'s original
+  layout), but `resize()` wrote the rays/results buffers to bindings 4/5 instead of 5/6. That
+  clobbered the lights binding with the rays buffer and left binding 6 (results — what the shader
+  actually writes to) never bound to anything, so the readback buffer stayed all zeros. Fixed by
+  writing rays/results to bindings 5/6. (An incidental side effect of this bug: with garbage
+  ray directions coming from the misbound buffer, most dispatched rays missed geometry
+  immediately, so the *first* round of timing — taken before this fix — showed the GPU dispatch
+  itself finishing in under 1 ms. That number was an artifact of the bug, not real work; see below
+  for the dispatch cost once rays are correct.)
+- Readback memory type: `createHostVisibleBuffer` hints VMA with
+  `HOST_ACCESS_SEQUENTIAL_WRITE_BIT`, appropriate for the portals/lights/rays upload buffers but
+  wrong for the results buffer, which the CPU only ever *reads*. On this dev machine (RTX 4080
+  SUPER) that made the per-frame readback `memcpy` alone cost 200-400 ms. Added
+  `createHostVisibleReadbackBuffer` (`HOST_ACCESS_RANDOM_BIT`, which VMA maps to a CPU-cached
+  memory type when available) in `gpu_dispatch_common.{hpp,cpp}` and switched both
+  `persistent_gpu_renderer.cpp`'s results buffer and `full_scene_gpu.cpp`'s (same latent bug, same
+  fix) to it. This dropped the readback to ~1.5 ms regardless of resolution — confirmed fixed.
+- Remaining fps ceiling, not a bug: with both fixes in and rays genuinely being traced, the real
+  bottleneck is `vkWaitForFences` itself (`vkQueueSubmit` is ~0.03 ms; the wait is where the time
+  goes), and it scales sublinearly with ray count: ~6.5 ms at 160x120 (19.2k rays), ~15.3 ms at
+  320x240 (76.8k rays), ~34 ms at 960x720 (691.2k rays). A large fixed floor plus a smaller
+  per-ray term is the signature of a bursty, one-dispatch-per-frame workload on a discrete GPU
+  that's mostly idle between frames — most likely driver/power-state ramp between dispatches
+  rather than the RT cores themselves (an RTX 4080 SUPER tracing <1M simple rays should be far
+  faster than this if kept busy). Ruled out `timeBeginPeriod(1)` (no effect) and confirmed
+  `vkQueueSubmit` alone is not the cost. Not fixed here — hiding it needs double-buffered/pipelined
+  submission (issue frame N+1's dispatch before waiting on frame N), which is a real architecture
+  change, not a quick fix, and this tool is a debug view (per this entry's own scoping), not a
+  target for that investment unless asked. Changed the viewer's default resolution step back to
+  the CPU viewer's middle step (400x300) instead of top-of-ladder, since top-of-ladder is not
+  fluid in practice on this hardware.
+
+Re-verified after both fixes: full `msvc-release` rebuild clean, all 25 tests green (including the
+GPU-vs-Embree RMSE test, so the readback-buffer memory-type change didn't alter correctness),
+viewer screenshot confirms the scene renders correctly (not black).
+
+## 0012 — GPU viewer fps: the bottleneck was CPU-side per-pixel work, not the GPU dispatch
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** User reported the GPU viewer (`tools/interactive_viewer_gpu.cpp`) still running at
+~10 fps at its top resolution step (960x720), asking for it to be sped up. #0011's own follow-up
+note had already named `vkWaitForFences` (~34 ms measured then) as "the real bottleneck," with
+double-buffered/pipelined submission flagged as the fix if this investment was ever asked for.
+Before building that (a real synchronization-state-machine rewrite, non-trivial to get right),
+added temporary `std::chrono` probes (constructor-to-return stages inside
+`PersistentGpuRenderer::render()`, plus render/tonemap/blit stages in the viewer's frame loop —
+same "add, measure, remove" discipline as #0011's own follow-up) and force-set the viewer's default
+resolution step to max for one measurement run, rather than trust the three-day-old numbers or a
+CPU-cost estimate.
+
+**Measured (this machine, RTX 4080 SUPER, 960x720, 691.2k rays/frame), before any fix:**
+- GPU-side wait (`vkWaitForFences`): 3-13 ms — not the ~34 ms #0011 measured; apparently improved
+  since (driver update or thermal/clock state), or that figure was itself noisy.
+- `render()`'s CPU-side ray-generation loop (builds `gpu::Ray` per pixel via
+  `Camera::rayDirectionForPixel`): 12-16 ms.
+- `render()`'s CPU-side readback-to-`Image` conversion loop: 5-7 ms.
+- The viewer's own tonemap loop (`toByte`: Reinhard + `std::pow` gamma correction, 3 channels/pixel,
+  ~2.07M `pow` calls at this resolution): **35-46 ms — the single largest cost in the entire frame,
+  larger than the whole GPU `render()` call.** This loop was never instrumented in #0011 (that
+  entry's probes lived inside `render()` only), so the earlier analysis had no visibility into it.
+
+Total frame time was CPU-bound, not GPU-bound: the GPU dispatch/wait was a minority of the ~65-90 ms
+per-frame cost that produced the reported ~10 fps.
+
+**Decision.** Parallelize the three per-pixel CPU loops with oneTBB `parallel_for`/`blocked_range`
+across image rows — the exact pattern `renderer.cpp`'s `renderEmbree` already uses (#0010), safe
+because every pixel only reads camera/shared-input state and writes its own output element (no
+loop-carried dependency):
+- `persistent_gpu_renderer.cpp`: the ray-generation loop (`std::vector<gpu::Ray>` — changed from
+  `push_back` to a pre-sized vector with indexed writes, since `push_back` isn't safe to call
+  concurrently) and the readback `Image`-conversion loop.
+- `interactive_viewer_gpu.cpp`: the tonemap loop.
+- `src/render/CMakeLists.txt`: added `TBB::tbb` to `render_vulkan`'s link libraries (it only had
+  Vulkan-stack dependencies before; `render_core` already links TBB for the Embree path). Public,
+  so `tools/interactive_viewer_gpu` picks it up transitively for its own `parallel_for` call — no
+  change needed in `tools/CMakeLists.txt`.
+
+Rejected (for now): the double-buffered/pipelined submission #0011 flagged. With the CPU-side
+loops fixed, the GPU wait (3-13 ms) is a small fraction of the new ~20 ms frame time — not the
+wall this entry's investigation was originally aimed at. Revisit only if a future measurement shows
+GPU wait dominating again; it's a materially higher-risk change (hand-rolled slot/fence
+ping-pong-buffer state machine) than this entry's fix, so it stays gated behind an actual
+measurement showing it's needed, per this project's "don't loosen the tolerance/guess, find the
+root cause" discipline applied to performance work too.
+
+**Measured (after the fix), same scene/resolution:** tonemap loop 35-46 ms → **1.5-1.9 ms**;
+ray-generation loop 12-16 ms → 6-7 ms (`std::pow` parallelizes better than the trig-heavy ray-gen
+loop, as expected — gamma correction was overwhelmingly the bigger win); GPU wait unchanged
+(3-8 ms, this loop wasn't touched). Viewer fps at 960x720: **~10 fps → ~50-70 fps.**
+
+**Verification.** Full `msvc-debug` rebuild + `ctest --preset msvc-debug`: 25/25 pass, including
+`test_gpu_vs_embree.cpp`'s RMSE gate — confirms the parallelization changed wall-clock time only,
+not any per-pixel value (same invariant #0010 verified for the CPU-side `renderEmbree`
+parallelization). Temporary probes and the forced max-resolution default were removed after
+measurement, per this project's own established discipline for this kind of investigation.
+
+## 0013 — Interactive viewers: the fly camera now actually crosses portals
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** User reported that walking the fly camera through the demo scene's portal disk just
+changed what was on screen without teleporting — confirmed (via a clarifying question) that they
+expected Portal-game-style teleportation (position + orientation transported by the portal's SE3),
+not the documented behavior. #0010 and #0011 both stated, as a deliberate simplification, that
+"the camera never itself crosses a portal": only the rendered rays hop through portals (via
+`stepThroughNearestPortal`), while the camera's own position/orientation moved through ordinary
+Euclidean space. Walking past a disk's plane in that design just puts the camera at whatever is
+physically at that Euclidean location in the single shared Embree/Vulkan scene (per
+`docs/PHYSICS.md`'s "rooms are a bookkeeping fiction, not separate geometry") — which is why the
+image changes abruptly at the disk instead of the camera teleporting to disk B's side.
+
+**Decision.** Both viewers' per-frame movement step now calls
+`manifold::stepThroughNearestPortal(camera.position, displacement, portals, 1.0)` — the same
+shared manifold-core primitive `traverse()` and the renderer's ray loop already use, not a new
+portal-crossing implementation (CLAUDE.md's manifold-core contract: one place this logic lives).
+`displacement` is this frame's actual move vector (not unit length), so `max_distance=1.0` means
+"did the segment from the old position to the intended new position cross a disk." On a crossing:
+- Position becomes the transformed crossing point plus the transformed *remaining* fraction of
+  this frame's movement (`hop.newDirection * (1 - hop.distanceToHit)`), so motion doesn't stutter
+  at the disk.
+- Orientation updates by transforming the current forward vector through `hop.hopTransform`'s
+  rotation and re-deriving yaw/pitch from the result (`atan2`/`asin`). This is exact as long as the
+  portal's rotation preserves world up, which holds for `demo_scene_common.cpp`'s only portal (a
+  180 deg rotation about `(0,1,0)`, matching CLAUDE.md's "180 deg flip about up" spec) — a future
+  portal tilting up itself would need a full basis (not yaw/pitch) and is out of scope here, same
+  as this viewer's other v1-scope boundaries.
+
+Implemented once in `tools/interactive_viewer.cpp` (`applyPortalCrossing`) and duplicated verbatim
+in `tools/interactive_viewer_gpu.cpp`, matching #0011's established precedent for this pair of
+files (structurally identical call sites, deliberately not factored into a shared shell).
+
+**Why this doesn't compromise the phase-gated core.** No files under `/src/manifold`,
+`/src/physics`, `/src/fields`, or the renderers changed — this only changes how `tools/`-level
+camera state is updated, consuming the existing tested primitive rather than adding new portal
+math.
+
+**Verification.** Full `msvc-release` + `msvc-debug` rebuild clean; `ctest --preset msvc-debug`
+25/25 pass (unchanged — no test exercises the interactive viewers' camera code).
+
+## 0014 — #0013's follow-up bug: a teleported camera saw the far side lit from the wrong side (black)
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** User reported that after #0013's fix, walking through the portal made everything go
+black. Root-caused with a throwaway CPU-side experiment (`tools/temp_verify_chart.cpp`, built,
+run, and deleted — same "add, measure, remove" discipline as #0011/#0012's own investigations)
+before writing any fix: rendered the demo scene from the exact pose #0013's camera lands at just
+after a hop (position `(0,0,20)`, forward `(0,0,-1)`) two ways — once through the existing
+`renderEmbree(scene, camera)` (implicitly `accumulated = identity` at `renderer.cpp:124`), once
+with `accumulated` seeded from the portal's `transformAtoB()`. Result: **0.0 avg brightness**
+(identity) vs **0.067** (seeded) — confirming the diagnosis before writing the real fix, not after.
+
+Root cause: `renderer.cpp`'s `traceRay`/`shade` (and `full_scene.slang`'s `traceRayFullScene`/
+`shade` mirror) compute a light's illuminating position as `accumulated.applyToPoint(light.position)`,
+where `accumulated` starts at identity and only accumulates a transform as *that ray* hops through
+portals during its own trace (docs/PHYSICS.md §3: a light's raw position is only valid when
+accumulated is identity; otherwise its image is the correct position). #0013 moved the *camera*
+through a portal but never told the renderer — every primary ray still started from `accumulated =
+identity`, so lighting used the light's raw, pre-portal position instead of its image on the far
+side. For this scene's single portal (180 deg rotation about world up + translation), the light's
+raw position ends up almost exactly *behind* whatever surface the teleported camera looks at
+(front-facing-flipped normal dotted against a light on the wrong side of it), so `cosTheta <= 0`
+for every light on every pixel — pure black, not a dim or partially-wrong image, exactly matching
+the report.
+
+**Decision.** Give the renderer a way to know which chart the *camera* itself currently occupies,
+symmetric with what a ray's own `accumulated` already tracks:
+- `render::renderEmbree(scene, camera, cameraChart = SE3::identity())` (`renderer.hpp/.cpp`): new
+  optional parameter, threaded into `traceRay`'s `accumulated` initial value (`= cameraChart`
+  instead of always `SE3::identity()`). Every existing call site (both acceptance tests,
+  `demo_scene.cpp`) omits it, so behavior there is byte-identical to before.
+- `render::renderVulkan(...)` (`full_scene_gpu.hpp/.cpp`) and `PersistentGpuRenderer::render(...)`
+  (`persistent_gpu_renderer.hpp/.cpp`): same optional `cameraChart` parameter, threaded through a
+  new push-constant field. `full_scene.slang`'s `PushConstants` cbuffer gained
+  `cameraChartRotation`/`cameraChartTranslation`, and `traceRayFullScene`'s `accumulated` now
+  starts from those instead of the hardcoded identity quaternion. New shared struct
+  `gpu::FullScenePushConstants` in `gpu_portal.hpp` (plus `toFullScenePushConstants`), replacing
+  the two ad hoc local `PushConstants` structs `full_scene_gpu.cpp` and
+  `persistent_gpu_renderer.cpp` each had — one byte-matched, static-asserted definition instead of
+  two hand-copies that would need to stay in sync by inspection, same rationale as this file's
+  existing `Transform`/`Portal`/etc. structs.
+- `tools/interactive_viewer.cpp` / `interactive_viewer_gpu.cpp`: `FlyCamera` gained a `chart`
+  field (`manifold::SE3`, default identity), updated in `applyPortalCrossing` the same way
+  `traverseImpl` composes hops (`chart = hop.hopTransform * chart`), and passed as `cameraChart` to
+  the render call.
+
+**Why the GPU shader change is in scope here (unlike #0010/#0011's "viewer stays outside the
+phase-gated core" boundary).** Confirmed with the user directly (two options offered: full CPU+GPU
+fix touching `full_scene.slang`/push-constants, or CPU-viewer-only leaving the GPU viewer black on
+crossing) — user chose the full fix. The new parameter defaults to identity everywhere it isn't
+explicitly passed, so `test_gpu_vs_embree.cpp` (#0008's RMSE gate) stays on the exact code path it
+was gated against.
+
+**Verification.**
+- CPU: `tools/temp_verify_chart.cpp` (deleted after use) — identity 0.0 → chart-seeded 0.067,
+  before writing the fix; confirms the diagnosis, not just the patch.
+- GPU: `tools/temp_verify_chart_gpu.cpp` (deleted after use, same discipline) through
+  `renderVulkan` at the same pose — identity 0.0 → chart-seeded 0.069 (matches the CPU figure
+  within float-vs-double/BVH tolerance, consistent with #0008's own measured fringe).
+- Full `msvc-debug` rebuild + `ctest --preset msvc-debug`: 25/25 pass, including
+  `test_gpu_vs_embree.cpp`'s RMSE gate — confirms the new push-constant field didn't disturb the
+  existing (identity-default) path's output at all.
+
+## 0015 — Interactive viewers: 2×2 supersampling to kill crawling aliasing on the portal rim
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** User reported "pixel noise" that persisted after two earlier fix attempts and got worse
+when flying farther from the portal ("отлететь подальше"), plus white specks appearing inside the
+shadowed region. The first attempts targeted GPU float-precision epsilons on a guess; they were the
+wrong cause. Root-caused this time by *measurement first* (a throwaway `demo_scene.cpp` edit + a
+temp `aa_probe` target, both built/run/reverted — same "add, measure, remove" discipline as
+#0011/#0012/#0014):
+- Rendered the demo scene pulled straight back along the portal axis (z = −20/−40/−80) — the actual
+  "fly away" case (the earlier attempt mistakenly scaled the *oblique* direction, which never had
+  the artifact, so it proved nothing).
+- Detected black dots (dark pixel, bright neighbours) and white-in-shadow dots (bright pixel, dark
+  neighbours) programmatically. Findings that fixed the diagnosis:
+  1. Embree (double) and Vulkan (float) produced **identical dot counts at every distance**
+     (10 black + 9 white at z = −20; 0 at z = −40/−80) — so it is a *shared geometric/sampling*
+     artifact, not float precision. This directly falsified the epsilon theory.
+  2. Every dot sat on the **same circle**: the portal disk's rim (r = 3 world units → ~91 px at
+     z = −20). Black dots on the true aperture circle, white dots ~1 px inside it.
+  3. **4×4 supersampling took the z = −20 frame from 19 dots to 0**, cleanly.
+
+Root cause: the portal disk is a hard silhouette edge (inside the aperture the ray sees the dark
+far side through the portal; just outside it hits the lit opaque frame). At 1 sample/pixel a rim
+pixel resolves to whichever side its single centre ray lands on, so individual pixels flip to the
+opposite of their neighbours; in motion they crawl, reading as "noise." Both dot colours are the
+same edge sampled from its two sides — one bug, not two. (The white-in-shadow dots are *not* a
+light leak from #0015's own shadow-offset work; they are the lit frame bleeding one pixel into the
+dark side at the rim.)
+
+**Decision.** Add regular-grid supersampling as an opt-in parameter to both renderer entry points,
+defaulting to 1 (one ray through the pixel centre, bit-identical to the un-supersampled path), and
+have only the interactive viewers pass 2:
+- `render::renderEmbree(scene, camera, cameraChart, samplesPerAxis = 1)` (`renderer.hpp/.cpp`):
+  traces `samplesPerAxis²` rays per pixel on an n×n sub-pixel grid and box-averages them. The
+  sub-sample offset is `x + (sx+0.5)/n − 0.5`, which for n = 1 is exactly the old `x + 0.5` pixel
+  centre — so every acceptance test (all of which call without the argument, and several of which
+  assert a single pixel's exact radiance) is unaffected, verified below.
+- `PersistentGpuRenderer::render(camera, cameraChart, samplesPerAxis = 1)`
+  (`persistent_gpu_renderer.hpp/.cpp`): the **shader is unchanged** — it still traces one ray per
+  ray-buffer entry. Supersampling is done host-side: the ray/result buffers are sized to
+  `width·height·n²`, the sub-samples for a pixel are laid out contiguously, and the readback loop
+  box-averages each pixel's block. `resize()` gained a `samplesPerAxis` argument and the class a
+  `currentSamplesPerAxis_` field so a change in AA factor triggers a re-allocation like a resolution
+  change does.
+- `tools/interactive_viewer.cpp` / `interactive_viewer_gpu.cpp`: pass `samplesPerAxis = 2`.
+
+Chose 2×2 (not 4×4) per the user's selection: it removes the reproduced dots entirely at 4× the
+per-frame ray cost, and the viewers' existing resolution ladders already default to a mid step for
+exactly this kind of budget. `renderVulkan` (the one-shot `full_scene_gpu.cpp` path used only by
+`demo_scene`/the RMSE test) was deliberately left at 1 spp — it isn't an interactive surface and the
+RMSE gate is calibrated against its 1-spp output.
+
+**Why this stays inside the "viewer, not phase-gated core" boundary (#0010/#0011).** The default is
+1 everywhere the tests and `demo_scene` call in, so `test_gpu_vs_embree.cpp` (#0008's RMSE gate),
+`test_shadow_through_portal.cpp`, and `test_corridor_*` all run on the exact same numbers as before.
+The AA is purely a viewer-side quality option layered on top.
+
+**Verification.**
+- Reproduction + fix measured on the real shipped code path (`renderEmbree` with the new parameter):
+  z = −20 front view, n = 1 → 10 black + 9 white dots (bit-identical to pre-change); n = 2 → 0 + 0.
+  Visual check confirms a smooth rim.
+- `render_tests_embree` (85 assertions) and `render_tests_gpu_vs_embree` (RMSE gate) both pass after
+  the change — the 1-spp default left every gated value untouched.
+- Both viewers rebuilt clean and now dispatch 2×2.
+
+**Note on the earlier epsilon edits (superseded reasoning, kept code).** The position-adaptive
+shadow-ray offset added to `renderer.cpp`/`full_scene.slang` before this entry does fix a *real but
+separate* defect — genuine single-precision shadow acne on the far annulus rim (float ULP > 1e-6 at
+coordinate ~25) — so it stays. It was simply not the cause of the rim "noise" the user was seeing;
+that is this entry's aliasing.
+
+## 0016 — GPU viewer fps: #0015's 2×2 supersampling re-introduced #0012's CPU bottleneck at 4×
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** User reported the GPU viewer back down to ~10 fps at "good resolution" after #0015's
+2×2 supersampling shipped. Measured first (temporary `std::chrono` probes in
+`PersistentGpuRenderer::render()` plus render/tonemap/blit stages in the viewer's frame loop, same
+discipline as #0011/#0012, forced default resolution step to max (960×720) for one measurement
+run): at 960×720×2×2 (2,764,800 rays/frame) the frame was **~76 ms (~13 fps)** — `submit+wait`
+25 ms, the CPU-side ray-generation loop 39 ms, CPU readback+box-average 8 ms. #0012 had fixed this
+exact bottleneck for 1× sampling by parallelizing these loops with TBB; 2×2 AA simply multiplied
+the same per-ray CPU costs 4× (2,764,800 vs #0012's 691,200 rays), pushing the fixed frame back
+over the ~13 fps line #0012 was written to eliminate. Not a regression in the parallelization
+itself — TBB was still spreading the work — the *amount* of CPU work per ray had grown.
+
+**Decision, two independent fixes to the CPU-side per-ray cost, in `render_core`'s shared code so
+every caller benefits (not just the GPU viewer):**
+
+1. **`Camera::rayDirectionForPixel` (`camera.hpp`/`.cpp`) recomputed `std::tan(vfov/2)` and an
+   aspect-ratio division on *every ray***, even though both are constant for the camera's whole
+   lifetime (only `px`/`py` vary per ray). Added two cached fields, `halfHeight`/`halfWidth`,
+   computed once by `Camera::lookAt` instead of per-call. Pure hoist — same arithmetic, same
+   evaluation order, computed once instead of millions of times. Benefits all three call sites
+   sharing this function: `PersistentGpuRenderer::render`, `renderEmbree`'s supersampling loop, and
+   `full_scene_gpu.cpp`'s one-shot path.
+2. **`PersistentGpuRenderer::render()` round-tripped every ray/result through a scratch
+   `std::vector` (value-init + `memcpy`) instead of writing/reading the mapped Vulkan buffers
+   directly.** `raysBuffer_` is allocated via `createHostVisibleBuffer`
+   (`HOST_ACCESS_SEQUENTIAL_WRITE_BIT`, write-combined memory — exactly suited to the parallel
+   loop's sequential per-pixel writes) and `resultsStagingBuffer_` via
+   `createHostVisibleReadbackBuffer` (`HOST_ACCESS_RANDOM_BIT`, CPU-cached memory — exactly suited
+   to the box-average loop's repeated reads), per `gpu_dispatch_common.hpp`'s own documented
+   rationale for those two allocation strategies (#0011). The scratch vectors added an 88 MB
+   zero-init plus an 88 MB `memcpy` on each end, for no benefit — removed; the parallel loops now
+   write into / read from the mapped pointers directly.
+
+**Measured (960×720, 2×2 AA, same machine as #0011/#0012), before → after fix 1 alone → after both
+fixes:** raygen 39 ms → 23 ms → 4 ms; GPU `submit+wait` 25 ms → ~12 ms → 4.5 ms (this stage wasn't
+touched by either fix directly; the drop tracks with less CPU-side contention around the
+submission, consistent with #0012's own note that this figure is noisy run-to-run — not something
+to over-index on in isolation); readback+average 8 ms → 8 ms → 3.6 ms. Total `render()` ~76 ms →
+~12.5 ms; viewer fps at max resolution (960×720, 2×2 AA): **~13 fps → steady 60 fps** (title-bar
+counter). Default resolution step (400×300, far less work) was already fast and untouched by this
+regression; this entry's fix targets the top of the ladder specifically, per the user's "good
+resolution" report.
+
+**A flaky test surfaced mid-investigation, root-caused as tooling, not a code defect.** After
+fix 1 landed, `ctest`'s `shadow through a portal: lit/shadowed boundary...` (fully deterministic —
+no RapidCheck, fixed sample points) intermittently crashed with MSVC's `/RTC1` check: "Stack around
+the variable 'camera' was corrupted." `Camera` grew by 16 bytes (the two new cached fields).
+Consecutive `ctest --repeat until-fail` runs against the *same already-built* binary mixed passes
+and failures, which rules out a simple stale-object-file ABI mismatch (that would corrupt
+identically on every run). The actual cause: this session's earlier `git stash push`/`pop` on
+`camera.cpp`/`camera.hpp` (used to A/B-test whether the crash was caused by the fix) interacted
+with the project's C++23 dyndep-based incremental header-dependency scanner, leaving some
+translation unit compiled against a stale `Camera` layout while others picked up the new 128-byte
+one — an ABI mismatch classically presenting as exactly this kind of stack corruption, with
+symptoms varying by which stale `.obj` files happened to be relinked between build invocations.
+Confirmed by the discriminating experiment: `rm -rf cmake-build-msvc-debug` (full clean
+reconfigure + rebuild, no incremental state left) then `ctest --repeat until-fail:30` on the
+target test — **30/30 clean**, all ~0.03 s (matching the baseline, no more of the anomalous
+1–20 s durations seen on the stale-build runs). Full suite re-verified after the clean rebuild:
+25/25 pass, including the RMSE gate (test 25) and this shadow test (test 23). No code changed to
+"fix" this — it was never a code bug, so nothing to fix beyond doing the clean rebuild.
+**Lesson for future sessions:** after `git stash` touches a header consumed by many translation
+units on this project's dyndep-based build, treat the next build as suspect — prefer a full clean
+rebuild over trusting the incremental one before drawing conclusions from a test result.
+
+**Verification.** Full `msvc-debug` clean rebuild (`rm -rf` + reconfigure + build) + `ctest
+--preset msvc-debug`: 25/25 pass. `msvc-release` also rebuilt clean (its prior binary still had
+this entry's temporary measurement probes and forced max-resolution default baked in from the
+investigation). Temporary `std::chrono` probes and the forced default-resolution-step override were
+removed from both `persistent_gpu_renderer.cpp` and `interactive_viewer_gpu.cpp` after measurement,
+per this project's established discipline for this kind of investigation.

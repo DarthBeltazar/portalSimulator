@@ -66,6 +66,9 @@ GpuTransform composeTransform(GpuTransform thisXf, GpuTransform rhs)
 
 // Direct port of the anonymous intersectDisk() in src/manifold/traverse.cpp: ray-plane
 // intersection against the disk's supporting plane, then a radius check at the hit point.
+// The t > epsilon guard uses a position-adaptive threshold: at large coordinates the float32 ULP
+// of `t` exceeds a fixed 1e-4, causing false self-hits (noise). Scaling with the origin's
+// magnitude mirrors the adaptive offsetOrigin() in full_scene.slang.
 bool intersectDisk(float3 origin, float3 direction, GpuPortalDisk disk, float maxDist, out float outDistance)
 {
     outDistance = 0.0;
@@ -74,7 +77,9 @@ bool intersectDisk(float3 origin, float3 direction, GpuPortalDisk disk, float ma
         return false; // ray parallel to the disk's plane
     }
     float t = dot(disk.normal, disk.center - origin) / denom;
-    if (t <= 0.0 || t > maxDist) {
+    float maxCoord = max(abs(origin.x), max(abs(origin.y), abs(origin.z)));
+    float tMin = max(1e-4, maxCoord * 5e-4);
+    if (t <= tMin || t > maxDist) {
         return false;
     }
     float3 hitPoint = origin + t * direction;

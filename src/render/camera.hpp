@@ -17,6 +17,12 @@ struct Camera {
     double verticalFovRadians;
     int imageWidth;
     int imageHeight;
+    // Derived from verticalFovRadians/imageWidth/imageHeight by lookAt, cached so
+    // rayDirectionForPixel -- called once per traced ray, so millions of times per frame at
+    // interactive resolutions with supersampling -- doesn't recompute a std::tan() and a division
+    // that are the same for every ray in a frame.
+    double halfHeight = 0.0;
+    double halfWidth = 0.0;
 
     // Builds an orthonormal camera basis from position/target/up-hint and vertical FOV.
     // A factory rather than a constructor so the type stays a plain aggregate for tests that

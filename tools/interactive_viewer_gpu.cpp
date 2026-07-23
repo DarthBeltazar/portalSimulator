@@ -7,45 +7,53 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <vector>
 
 #include <Eigen/Core>
 
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+
 #include "manifold/traverse.hpp"
 
 #include "render/camera.hpp"
 #include "render/image.hpp"
-#include "render/renderer.hpp"
+#include "render/persistent_gpu_renderer.hpp"
 #include "render/scene.hpp"
+#include "render/vulkan_context.hpp"
 
 #include "demo_scene_common.hpp"
 
-// Real-time fly-through viewer for the shared demo scene (tools/demo_scene_common), for looking
-// at the render interactively instead of only inspecting static BMPs (tools/demo_scene.cpp).
-// Windows-only (raw Win32 + GDI, no new dependency) and CPU-only: it calls render::renderEmbree
-// once per frame, same as the static demo -- render_core's reference renderer is a plain
-// per-pixel loop (docs/phase2-rendering.md §4), not built for real time, so the render
-// resolution below is kept modest and stretched up to the window with GDI. The Vulkan RT path
-// (render_vulkan) isn't wired in here: full_scene_gpu.cpp rebuilds its acceleration structure
-// from scratch on every call (its own header says so), which is fine for a one-shot comparison
-// image but not for a per-frame interactive loop.
+// GPU counterpart to tools/interactive_viewer.cpp (docs/DECISIONS.md #0011): identical Win32 +
+// GDI window, fly camera, and input handling, but each frame dispatches
+// render::PersistentGpuRenderer (Vulkan RT, full_scene.slang) instead of render::renderEmbree.
+// Still headless-Vulkan + CPU readback + GDI blit -- no swapchain, same presentation path as the
+// CPU viewer -- see persistent_gpu_renderer.hpp's header comment for why that's the right scope
+// here (a debug view, not a product surface; a swapchain is a separate, larger task).
+//
+// Deliberately duplicates interactive_viewer.cpp's window/camera/input code rather than sharing
+// it: that tool is already tested-by-use and green: docs/DECISIONS.md #0010; not worth the risk
+// of touching it to extract a shared shell for a second, structurally-identical call site.
 
 namespace {
 
 constexpr int kWindowWidth = 960;
 constexpr int kWindowHeight = 720;
 
-// Render resolution steps (4:3, matching the window above so the display scale factor stays
-// sane at every step). render_core's renderEmbree is a single-threaded per-pixel loop
-// (docs/phase2-rendering.md §4) with no acceleration-structure-reuse across frames beyond what
-// Embree itself caches internally, so cost scales ~linearly with pixel count; the highest step
-// (matching the window 1:1) is a deliberate slideshow-quality option for standing still and
-// looking at detail, not for flying around -- '-' steps back down for that.
+// Same resolution ladder as interactive_viewer.cpp. Measured on this dev machine (docs/
+// DECISIONS.md #0011's follow-up note): per-frame cost is dominated by GPU dispatch+fence-wait
+// latency that scales sublinearly with ray count (a large fixed per-submission floor, likely
+// power-state ramp on a bursty single-dispatch-per-frame pattern, plus a smaller compute-scaling
+// term) -- not CPU work, and not a hardware ceiling (RTX 4080 SUPER). Concretely: ~58 fps at
+// 160x120, ~35 fps at 320x240, ~12 fps at 960x720. Top-of-ladder therefore is not "fluid" in
+// practice, so default to a middle step like the CPU viewer does, for the same reason; '+' still
+// reaches full window resolution for standing still and looking at detail.
 constexpr int kResolutionSteps[][2] = {{160, 120}, {240, 180}, {320, 240}, {400, 300},
                                         {480, 360}, {640, 480}, {800, 600}, {960, 720}};
 constexpr int kResolutionStepCount = sizeof(kResolutionSteps) / sizeof(kResolutionSteps[0]);
-constexpr int kDefaultResolutionStep = 3; // 400x300: noticeably crisper than 320x240, still fluid
+constexpr int kDefaultResolutionStep = 3; // 400x300: fluid, matches the CPU viewer's own default
 
 constexpr double kMoveSpeed = 6.0; // world units / second
 constexpr double kSprintMultiplier = 3.0;
@@ -60,24 +68,16 @@ unsigned char toByte(double radiance) {
 
 bool keyDown(int virtualKey) { return (GetAsyncKeyState(virtualKey) & 0x8000) != 0; }
 
-// Spherical yaw/pitch around a fixed world up axis (no roll) -- a standard noclip/spectator
-// camera. Between portal crossings this is ordinary Euclidean orbiting, no manifold::traverse
-// needed. When the per-frame movement segment crosses a portal disk, applyPortalCrossing (below)
-// teleports position/orientation by the portal's SE3 -- the scene's only portal (demo_scene_common)
-// rotates 180 deg about world up, so up stays up and this yaw/pitch parameterization survives the
-// hop unchanged; a portal tilting up itself is out of scope (CLAUDE.md's "moving portals" etc. are
-// explicitly out of scope for v1, and this viewer only ever loads the one demo scene).
+// Same spectator camera as interactive_viewer.cpp -- see that file's header comment for why plain
+// Euclidean yaw/pitch is correct between crossings, and applyPortalCrossing below (duplicated from
+// there, same rationale as this file's other deliberate duplication) for how a crossing updates it.
 struct FlyCamera {
     Eigen::Vector3d position{0, 0, -10};
     double yaw = 0.0;
     double pitch = 0.0;
-    // Accumulated SE3 mapping the home chart's coordinates into whichever chart this camera
-    // currently sits in -- identity until the first crossing, composed the same way traverseImpl
-    // composes hops (`hop.hopTransform * chart`). Passed to renderEmbree as cameraChart so
-    // lighting uses the light's image in *this* chart instead of always assuming the home chart
-    // (docs/DECISIONS.md #0013's follow-up: without this, every surface seen after a crossing was
-    // lit by the light's raw, wrong-chart position -- usually landing behind the visible face,
-    // i.e. cosTheta <= 0 for every light, i.e. black).
+    // Accumulated SE3 mapping the home chart into whatever chart this camera currently sits in --
+    // see interactive_viewer.cpp's identical field for the full rationale (docs/DECISIONS.md
+    // #0013's follow-up). Passed to PersistentGpuRenderer::render as cameraChart.
     manifold::SE3 chart = manifold::SE3::identity();
 
     Eigen::Vector3d forward() const {
@@ -85,12 +85,10 @@ struct FlyCamera {
     }
 };
 
-// Advances `camera` by `displacement` (this frame's move vector, not necessarily unit), applying
-// the nearest portal's SE3 to position, orientation, and chart if the segment crosses a disk
-// within this frame's movement -- otherwise a plain Euclidean step. This is the one place the
-// viewer's camera touches portal semantics, and it does so only through
-// manifold::stepThroughNearestPortal (the same primitive traverse() and the renderer's ray loop
-// use), per CLAUDE.md's manifold-core contract: no reimplementing disk-crossing math here.
+// See interactive_viewer.cpp's identical helper for the full rationale: teleports position,
+// orientation, and chart by the nearest portal's SE3 when this frame's movement segment crosses a
+// disk, via manifold::stepThroughNearestPortal (the shared primitive), otherwise a plain Euclidean
+// step.
 void applyPortalCrossing(FlyCamera& camera, const std::vector<manifold::Portal>& portals,
                           const Eigen::Vector3d& displacement) {
     manifold::PortalHopResult hop = manifold::stepThroughNearestPortal(camera.position, displacement, portals, 1.0);
@@ -99,8 +97,6 @@ void applyPortalCrossing(FlyCamera& camera, const std::vector<manifold::Portal>&
         return;
     }
 
-    // hop.newOrigin only advances to the crossing point; carry the remaining fraction of this
-    // frame's movement through in the new chart so motion doesn't stutter at the disk.
     camera.position = hop.newOrigin + hop.newDirection * (1.0 - hop.distanceToHit);
 
     Eigen::Vector3d newForward = hop.hopTransform.applyToVector(camera.forward()).normalized();
@@ -147,7 +143,21 @@ int main() {
     render::Scene scene;
     tools::buildDemoScene(scene);
 
-    const wchar_t* kClassName = L"PortalSimInteractiveViewer";
+    // No CPU fallback in this tool (that's interactive_viewer.cpp) -- report cleanly and exit
+    // rather than an unhandled-exception crash if this machine lacks Vulkan RT.
+    std::unique_ptr<render::VulkanContext> context;
+    std::unique_ptr<render::PersistentGpuRenderer> gpuRendererPtr;
+    try {
+        context = std::make_unique<render::VulkanContext>();
+        gpuRendererPtr =
+            std::make_unique<render::PersistentGpuRenderer>(*context, scene.portals(), scene.lights(), scene.meshes());
+    } catch (const std::exception& e) {
+        std::cerr << "Vulkan RT unavailable on this machine (" << e.what() << ") -- cannot run the GPU viewer.\n";
+        return 1;
+    }
+    render::PersistentGpuRenderer& gpuRenderer = *gpuRendererPtr;
+
+    const wchar_t* kClassName = L"PortalSimInteractiveViewerGpu";
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -157,7 +167,7 @@ int main() {
 
     RECT windowRect{0, 0, kWindowWidth, kWindowHeight};
     AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND hwnd = CreateWindowExW(0, kClassName, L"Portal Simulator -- interactive viewer",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"Portal Simulator -- interactive viewer (GPU)",
                                  WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                  windowRect.right - windowRect.left, windowRect.bottom - windowRect.top, nullptr,
                                  nullptr, wc.hInstance, nullptr);
@@ -213,8 +223,6 @@ int main() {
         lastTime = now;
         dt = std::min(dt, 0.1); // clamp so a stall (window drag, breakpoint) doesn't teleport the camera
 
-        // Esc: release the mouse if captured (first press), else quit -- edge-triggered so
-        // holding the key doesn't toggle every frame.
         bool escapeDown = keyDown(VK_ESCAPE);
         if (escapeDown && !prevEscapeDown) {
             if (app.mouseCaptured) {
@@ -227,8 +235,6 @@ int main() {
         }
         prevEscapeDown = escapeDown;
 
-        // '+'/'-' (main row or numpad): step render resolution up/down, edge-triggered same as
-        // Esc above. Works regardless of mouse capture, since it's not a look/move control.
         bool resUpDown = keyDown(VK_OEM_PLUS) || keyDown(VK_ADD);
         bool resDownDown = keyDown(VK_OEM_MINUS) || keyDown(VK_SUBTRACT);
         if (resUpDown && !prevResUpDown && resolutionStep + 1 < kResolutionStepCount) {
@@ -251,11 +257,6 @@ int main() {
             GetCursorPos(&cursor);
             double dx = static_cast<double>(cursor.x - centerScreen.x);
             double dy = static_cast<double>(cursor.y - centerScreen.y);
-            // render::Camera::rayDirectionForPixel (src/render/camera.cpp) builds screen-right
-            // from forward.cross(up) -- the same formula used for `right` below -- and that
-            // vector points opposite to the direction increasing yaw turns `forward` toward, so
-            // yaw must decrease (not increase) for rightward mouse motion to pan the view toward
-            // screen-right instead of screen-left.
             flyCamera.yaw -= dx * kMouseSensitivity;
             flyCamera.pitch = std::clamp(flyCamera.pitch - dy * kMouseSensitivity, -kMaxPitch, kMaxPitch);
             SetCursorPos(centerScreen.x, centerScreen.y);
@@ -281,19 +282,25 @@ int main() {
             render::Camera::lookAt(flyCamera.position, flyCamera.position + flyCamera.forward(),
                                     Eigen::Vector3d(0, 1, 0), /*verticalFovRadians=*/1.0, renderWidth, renderHeight);
         // 2x2 supersampling: suppresses the crawling stair-step aliasing on the portal disk's
-        // curved rim (docs/DECISIONS.md #0015). Costs 4x the rays; the resolution ladder above is
-        // sized with that in mind.
-        render::Image image = render::renderEmbree(scene, camera, flyCamera.chart, /*samplesPerAxis=*/2);
+        // curved rim (docs/DECISIONS.md #0015), matching the CPU viewer. 4x the rays per frame; the
+        // resolution ladder above is sized with that in mind.
+        render::Image image = gpuRenderer.render(camera, flyCamera.chart, /*samplesPerAxis=*/2);
 
-        for (int y = 0; y < renderHeight; ++y) {
-            for (int x = 0; x < renderWidth; ++x) {
-                const Eigen::Vector3d& c = image.at(x, y);
-                std::size_t idx = (static_cast<std::size_t>(y) * renderWidth + static_cast<std::size_t>(x)) * 3;
-                pixels[idx + 0] = toByte(c.z()); // BGR, matching BITMAPINFO's biBitCount=24 layout
-                pixels[idx + 1] = toByte(c.y());
-                pixels[idx + 2] = toByte(c.x());
+        // Dominated by std::pow (gamma correction) per channel per pixel -- measured as the single
+        // largest per-frame cost in this viewer, larger than the GPU dispatch itself. Each pixel
+        // writes only its own bytes, so parallelizing across rows is safe (same pattern already
+        // used for renderEmbree/persistent_gpu_renderer's per-pixel loops).
+        tbb::parallel_for(tbb::blocked_range<int>(0, renderHeight), [&](const tbb::blocked_range<int>& rows) {
+            for (int y = rows.begin(); y != rows.end(); ++y) {
+                for (int x = 0; x < renderWidth; ++x) {
+                    const Eigen::Vector3d& c = image.at(x, y);
+                    std::size_t idx = (static_cast<std::size_t>(y) * renderWidth + static_cast<std::size_t>(x)) * 3;
+                    pixels[idx + 0] = toByte(c.z()); // BGR, matching BITMAPINFO's biBitCount=24 layout
+                    pixels[idx + 1] = toByte(c.y());
+                    pixels[idx + 2] = toByte(c.x());
+                }
             }
-        }
+        });
 
         RECT clientRect;
         GetClientRect(hwnd, &clientRect);
@@ -307,7 +314,7 @@ int main() {
         fpsAccumSeconds += dt;
         if (fpsAccumSeconds >= 0.5) {
             std::wostringstream title;
-            title << L"Portal Simulator -- interactive viewer  |  " << renderWidth << L"x" << renderHeight
+            title << L"Portal Simulator -- interactive viewer (GPU)  |  " << renderWidth << L"x" << renderHeight
                   << L"  |  " << static_cast<int>(fpsFrameCount / fpsAccumSeconds) << L" fps ([+]/[-])  |  "
                   << (app.mouseCaptured ? L"WASD+mouse, Esc to release" : L"click to look around");
             SetWindowTextW(hwnd, title.str().c_str());

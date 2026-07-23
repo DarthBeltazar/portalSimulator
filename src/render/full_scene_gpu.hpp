@@ -5,6 +5,7 @@
 #include <Eigen/Core>
 
 #include "manifold/portal.hpp"
+#include "manifold/se3.hpp"
 
 #include "camera.hpp"
 #include "image.hpp"
@@ -24,8 +25,11 @@
 
 namespace render {
 
+// `cameraChart` is the accumulated SE3 mapping the home chart into whatever chart `camera` itself
+// currently sits in -- identity (the default) for a camera that never crossed a portal. See
+// renderEmbree's (src/render/renderer.hpp) identical parameter for the full rationale.
 Image renderVulkan(VulkanContext& context, const std::vector<manifold::Portal>& portals,
                     const std::vector<PointLight>& lights, const std::vector<TriangleMesh>& meshes,
-                    const Camera& camera);
+                    const Camera& camera, const manifold::SE3& cameraChart = manifold::SE3::identity());
 
 } // namespace render

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "manifold/se3.hpp"
+
 #include "camera.hpp"
 #include "image.hpp"
 #include "scene.hpp"
@@ -18,6 +20,23 @@
 
 namespace render {
 
-Image renderEmbree(const Scene& scene, const Camera& camera);
+// `cameraChart` is the accumulated SE3 mapping the *home* chart's coordinates into the chart
+// `camera` itself currently sits in -- identity (the default) for a camera that has never
+// crossed a portal, or `hop.hopTransform * previousCameraChart` (traverseImpl's own composition
+// order) after a caller has moved the camera through one. Every primary ray still starts fresh
+// from `camera.position` and accumulates its own per-hop transform exactly as before; this only
+// changes what a ray with *zero* hops of its own starts from, so lighting/shadowing correctly use
+// the light's image in the camera's actual chart instead of always assuming the camera is in the
+// home chart (docs/DECISIONS.md #0013's follow-up note: without this, a camera moved into another
+// chart by #0013's portal-crossing lit every surface with the light's raw, wrong-chart position).
+// `samplesPerAxis` is the anti-aliasing supersampling factor: samplesPerAxis^2 primary rays are
+// traced per pixel on a regular sub-pixel grid and box-averaged. The default of 1 is exactly
+// one ray through the pixel centre -- bit-identical to the un-supersampled renderer, so the
+// numeric acceptance tests (which sample individual pixels' radiance) are unaffected. The
+// interactive viewers pass 2 (a 2x2 grid) to suppress the crawling stair-step aliasing on the
+// portal disk's curved rim, where a hard silhouette edge sampled once per pixel flips whole
+// pixels between the lit frame and the dark through-portal side (docs/DECISIONS.md #0015).
+Image renderEmbree(const Scene& scene, const Camera& camera,
+                    const manifold::SE3& cameraChart = manifold::SE3::identity(), int samplesPerAxis = 1);
 
 } // namespace render

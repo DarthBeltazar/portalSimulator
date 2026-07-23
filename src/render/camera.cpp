@@ -20,16 +20,15 @@ Camera Camera::lookAt(Eigen::Vector3d position, Eigen::Vector3d target, Eigen::V
     camera.verticalFovRadians = verticalFovRadians;
     camera.imageWidth = imageWidth;
     camera.imageHeight = imageHeight;
+    // Exact pinhole projection: the image plane sits at unit distance along `forward`, with
+    // half-height tan(vfov/2) — no small-angle approximation, per this header's own contract.
+    // Computed once here rather than per-ray in rayDirectionForPixel (see that field's comment).
+    camera.halfHeight = std::tan(0.5 * verticalFovRadians);
+    camera.halfWidth = camera.halfHeight * (static_cast<double>(imageWidth) / static_cast<double>(imageHeight));
     return camera;
 }
 
 Eigen::Vector3d Camera::rayDirectionForPixel(double px, double py) const {
-    // Exact pinhole projection: the image plane sits at unit distance along `forward`, with
-    // half-height tan(vfov/2) — no small-angle approximation, per this header's own contract.
-    const double halfHeight = std::tan(0.5 * verticalFovRadians);
-    const double aspect = static_cast<double>(imageWidth) / static_cast<double>(imageHeight);
-    const double halfWidth = halfHeight * aspect;
-
     const double ndcX = ((px + 0.5) / imageWidth) * 2.0 - 1.0;
     const double ndcY = 1.0 - ((py + 0.5) / imageHeight) * 2.0;
 

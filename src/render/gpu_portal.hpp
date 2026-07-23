@@ -179,4 +179,40 @@ struct RadianceOut {
 static_assert(sizeof(RadianceOut) == 16);
 static_assert(offsetof(RadianceOut, radiance) == 0);
 
+// Mirrors src/render/shaders/full_scene.slang's PushConstants cbuffer. HLSL cbuffer packing (not
+// std430) but the same practical rule: a scalar run doesn't cross a 16-byte register boundary, so
+// portalCount/lightCount/rayCount + a padding uint fill the first register, then
+// cameraChartRotation/cameraChartTranslation follow the same float4-then-float3(+pad) shape as
+// Transform above. cameraChart is the accumulated SE3 mapping the home chart into whatever chart
+// the *camera* itself currently sits in (docs/DECISIONS.md #0013's follow-up) -- identity for a
+// camera that has never crossed a portal, matching every existing call site's default and keeping
+// them byte-identical to before this field existed.
+struct FullScenePushConstants {
+    std::uint32_t portalCount;
+    std::uint32_t lightCount;
+    std::uint32_t rayCount;
+    std::uint32_t _pad0;
+    float cameraChartRotation[4]; // x, y, z, w
+    float cameraChartTranslation[3];
+    float _pad1;
+};
+static_assert(sizeof(FullScenePushConstants) == 48);
+static_assert(offsetof(FullScenePushConstants, cameraChartRotation) == 16);
+static_assert(offsetof(FullScenePushConstants, cameraChartTranslation) == 32);
+
+inline FullScenePushConstants toFullScenePushConstants(std::uint32_t portalCount, std::uint32_t lightCount,
+                                                        std::uint32_t rayCount,
+                                                        const manifold::SE3& cameraChart) {
+    FullScenePushConstants result{};
+    result.portalCount = portalCount;
+    result.lightCount = lightCount;
+    result.rayCount = rayCount;
+    result.cameraChartRotation[0] = static_cast<float>(cameraChart.rotation().x());
+    result.cameraChartRotation[1] = static_cast<float>(cameraChart.rotation().y());
+    result.cameraChartRotation[2] = static_cast<float>(cameraChart.rotation().z());
+    result.cameraChartRotation[3] = static_cast<float>(cameraChart.rotation().w());
+    writeVec3(result.cameraChartTranslation, cameraChart.translation());
+    return result;
+}
+
 } // namespace render::gpu
