@@ -38,7 +38,7 @@
         "CMAKE_CXX_COMPILER": "clang-cl",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL",
         "CMAKE_MAP_IMPORTED_CONFIG_DEBUG": "Release",
-        "CMAKE_CXX_FLAGS": "/Zc:__cplusplus /W4 /EHsc /fp:precise -fsanitize=address,undefined /D_DISABLE_VECTOR_ANNOTATION /D_DISABLE_STRING_ANNOTATION",
+        "CMAKE_CXX_FLAGS": "/Zc:__cplusplus /W4 /EHsc /fp:precise -fsanitize=address,undefined /D_DISABLE_VECTOR_ANNOTATION /D_DISABLE_STRING_ANNOTATION /D_DISABLE_OPTIONAL_ANNOTATION",
         "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/clang-cl-asan-linker-flags.cmake"
       },
       "architecture": { "value": "x64", "strategy": "external" },

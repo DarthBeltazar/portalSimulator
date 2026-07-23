@@ -330,3 +330,44 @@ than what a real regression would produce:
 
 Revisit if a future scene/resolution change moves the fringe size enough to need re-measuring, or
 if a genuine shading/transform bug is later caught by this gate and the margin needs tightening.
+
+## 0009 — `_DISABLE_OPTIONAL_ANNOTATION` for the `clang-cl-sanitize` gate
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** A from-scratch reconfigure/rebuild of `cmake-build-clang-cl-sanitize` (triggered
+incidentally by an unrelated `CMakeLists.txt` edit removing the leftover CLion-template
+`portalSimulator` executable) failed at the link step for every target that pulls in
+`manifold_core` alongside vcpkg's prebuilt Catch2/rapidcheck/vk-bootstrap libraries:
+`lld-link: error: /failifmismatch: mismatch detected for 'annotate_optional'` — our own
+freshly-compiled object files (e.g. `traverse.cpp.obj`) carry value `1`, vcpkg's prebuilt
+`Catch2.lib` carries value `0`. The existing sanitizer test binaries (built before this
+reconfigure) still ran and passed unaffected — this only blocks a *fresh* link, not previously
+built artifacts.
+
+Root cause (confirmed via web search, since neither the installed MSVC STL headers nor any
+vcpkg-installed header contains the literal string — the pragma is compiler-synthesized, not
+header text): `annotate_optional` is a newer ASan container-annotation `#pragma detect_mismatch`
+that MSVC STL added (14.51+) for `std::optional`, exactly parallel to the pre-existing
+`annotate_vector`/`annotate_string` pair this project already suppresses via
+`_DISABLE_VECTOR_ANNOTATION`/`_DISABLE_STRING_ANNOTATION` in the `clang-cl-sanitize` preset
+(`CMakePresets.json`). Translation units built with `-fsanitize=address` emit `annotate_optional=1`
+by default; vcpkg's prebuilt dependency binaries are built without ASan and emit `0`. The same
+class of problem the two existing macros were added for, just a third container type the STL
+grew after those two were put in place — a toolchain-version-drift gap, not something introduced
+by the edit that happened to surface it.
+
+**Decision.** Add `/D_DISABLE_OPTIONAL_ANNOTATION` to `clang-cl-sanitize`'s `CMAKE_CXX_FLAGS` in
+`CMakePresets.json`, alongside the two existing `_DISABLE_*_ANNOTATION` macros — same mechanism,
+same rationale, no new pattern introduced.
+
+**Verification.** Fresh `cmake-build-clang-cl-sanitize` tree (deleted and reconfigured from
+scratch): 35/35 build steps link cleanly (previously failed at the `manifold_tests`/`render_tests`/
+`render_tests_gpu_vs_embree`/`render_tests_embree` link steps). `ctest`: 22/22 pass, matching
+decision #0005's documented count exactly (the 3 Embree-linked tests still correctly excluded from
+discovery). `msvc-debug` reconfigured and re-tested unaffected: 25/25 (this preset's
+`CMAKE_CXX_FLAGS` wasn't touched).
+
+**Revisit if:** a future MSVC STL version adds another annotated container type and trips the same
+class of mismatch again — same fix, same place.
