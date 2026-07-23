@@ -16,6 +16,8 @@ add_library(render_vulkan STATIC
     vma_impl.cpp
     portal_hop_gpu.cpp
     portal_traverse_gpu.cpp
+    acceleration_structure.cpp
+    triangle_query_gpu.cpp
 )
 target_include_directories(render_vulkan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(render_vulkan PUBLIC
@@ -44,3 +46,12 @@ compile_slang_shader(${CMAKE_CURRENT_SOURCE_DIR}/shaders/portal_traverse.slang m
 add_custom_target(portal_traverse_shader DEPENDS ${PORTAL_TRAVERSE_SPV})
 add_dependencies(render_vulkan portal_traverse_shader)
 target_compile_definitions(render_vulkan PUBLIC PORTAL_TRAVERSE_SPV_PATH="${PORTAL_TRAVERSE_SPV}")
+
+# triangle_query.slang (docs/phase2-rendering.md §7 step 8's "triangle in a TLAS, ray-queried"
+# milestone): sm_6_5, not sm_6_0 like the plain-arithmetic portal shaders -- inline ray tracing's
+# RayQuery<> type requires it (confirmed empirically with slangc + spirv-val before writing the
+# host-side acceleration_structure.cpp).
+compile_slang_shader(${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_query.slang main sm_6_5 TRIANGLE_QUERY_SPV)
+add_custom_target(triangle_query_shader DEPENDS ${TRIANGLE_QUERY_SPV})
+add_dependencies(render_vulkan triangle_query_shader)
+target_compile_definitions(render_vulkan PUBLIC TRIANGLE_QUERY_SPV_PATH="${TRIANGLE_QUERY_SPV}")

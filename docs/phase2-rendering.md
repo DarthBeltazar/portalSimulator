@@ -229,7 +229,30 @@ enough, and `/src/geometry/` is explicitly a later-phase (rim cutting, Phase 5) 
    - **vcpkg.json:** added `vulkan`, `vulkan-headers`, `vulkan-loader`, `volk`,
      `vulkan-memory-allocator`, `vk-bootstrap`, `shader-slang` — all resolved cleanly on
      `msvc-debug` reconfigure, existing targets unaffected.
-8. Vulkan RT implementation, criterion 3, final Phase 2 report.
+8. Vulkan RT implementation, criterion 3, final Phase 2 report. In progress:
+   - **Done (2026-07-23).** Headless instance/device/queue/allocator bootstrap; ray query +
+     acceleration structure device features enabled at device creation; portal-hop shader ported
+     and validated (single-hop and multi-hop/accumulated-transform composition) against the CPU
+     reference via `tests/render/test_portal_hop_gpu_differential.cpp` and
+     `test_portal_traverse_gpu_differential.cpp`.
+   - **Done (2026-07-23).** Validation layers (`VK_LAYER_KHRONOS_validation`) enabled on debug
+     builds (`vulkan_context.cpp`, `#ifndef NDEBUG`) — both CMakePresets configure Debug, so this
+     is always-on for this project; a wrong AS buffer-usage flag, missing barrier, or misaligned
+     scratch offset otherwise produces driver-defined garbage instead of a catchable error.
+   - **Done (2026-07-23).** The "triangle in a TLAS, ray-queried" milestone: `src/render/
+     acceleration_structure.{hpp,cpp}` builds a single-mesh BLAS + single-instance TLAS (device
+     builds, `vkCmdBuildAccelerationStructuresKHR` in the same one-shot command-buffer/fence
+     pattern the other `*_gpu.cpp` files use); `src/render/shaders/triangle_query.slang`
+     (`sm_6_5`, `RayQuery<>` inline ray tracing per DECISIONS.md #0007) ray-queries it;
+     `tests/render/test_acceleration_structure_smoke.cpp` asserts hit distance and hit position
+     against hand-computed values for a known triangle (not just hit/miss). Deliberately scoped
+     to one mesh / no portal integration — combining scene-geometry ray queries with the
+     portal-hop loop into the full-scene shader is the next step. Green under both presets (128
+     assertions / 10 test cases each), clean under Vulkan validation and clang-cl ASan/UBSan.
+   - **Remaining:** the full-scene compute shader (portal-hop loop + scene-geometry ray query,
+     whichever nearer, per §3/§4's "same as the Embree path's control flow"), `render::Camera`
+     GPU dispatch producing a full image, the GPU-vs-Embree RMSE comparison (§5.3/DECISIONS.md
+     #0008), criterion 3's acceptance test, final Phase 2 report.
 
 ## Open questions for the user
 

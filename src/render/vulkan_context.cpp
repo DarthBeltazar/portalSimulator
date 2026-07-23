@@ -21,8 +21,18 @@ VulkanContext::VulkanContext() {
     }
 
     vkb::InstanceBuilder instanceBuilder(vkGetInstanceProcAddr);
-    auto instanceResult =
-        instanceBuilder.set_app_name("portalSimulator-render-vulkan").require_api_version(1, 3, 0).set_headless(true).build();
+    instanceBuilder.set_app_name("portalSimulator-render-vulkan").require_api_version(1, 3, 0).set_headless(true);
+#ifndef NDEBUG
+    // Debug builds only (both CMakePresets configure Debug — CLAUDE.md's sanitizer-gate
+    // discipline applies to CPU UB/memory errors; this is the GPU-side equivalent for the
+    // acceleration-structure work starting in docs/phase2-rendering.md §7 step 8, where a wrong
+    // buffer usage flag, missing barrier, or misaligned scratch offset produces driver-defined
+    // garbage instead of a catchable error without validation). VK_LAYER_KHRONOS_validation
+    // ships with the Vulkan SDK already required to build/run this project (vulkaninfo, §7
+    // checkpoint) — no new dependency.
+    instanceBuilder.request_validation_layers().use_default_debug_messenger();
+#endif
+    auto instanceResult = instanceBuilder.build();
     if (!instanceResult) {
         throwVkbError("Vulkan instance creation failed", instanceResult.full_error());
     }

@@ -4,6 +4,7 @@ add_executable(render_tests
     test_vulkan_context_smoke.cpp
     test_portal_hop_gpu_differential.cpp
     test_portal_traverse_gpu_differential.cpp
+    test_acceleration_structure_smoke.cpp
 )
 target_link_libraries(render_tests PRIVATE render_core render_vulkan manifold_core Catch2::Catch2WithMain)
 
