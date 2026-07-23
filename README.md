@@ -83,3 +83,7 @@ transform to machine `double` precision, holonomy around a portal rim matches th
 deficit, brightness through a corridor of portals matches an exact inverse-square derivation, and
 the GPU render matches the Embree reference within a set RMSE. If a test doesn't converge, the
 project's rule is to find the root cause, not loosen the tolerance.
+
+## License
+
+[MIT](LICENSE).
