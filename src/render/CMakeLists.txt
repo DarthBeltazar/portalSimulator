@@ -5,7 +5,7 @@ add_library(render_core STATIC
     renderer.cpp
 )
 target_include_directories(render_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
-target_link_libraries(render_core PUBLIC manifold_core Eigen3::Eigen embree)
+target_link_libraries(render_core PUBLIC manifold_core Eigen3::Eigen embree TBB::tbb)
 
 # Vulkan RT sub-step (docs/phase2-rendering.md §7 step 8): headless compute-only GPU path, kept
 # as its own target rather than folded into render_core — a separate concern (GPU cross-check,

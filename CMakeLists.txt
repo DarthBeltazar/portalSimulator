@@ -5,6 +5,12 @@ find_package(Eigen3 CONFIG REQUIRED)
 find_package(Catch2 3 CONFIG REQUIRED)
 find_package(rapidcheck CONFIG REQUIRED)
 find_package(embree CONFIG REQUIRED)
+# oneTBB (CLAUDE.md tech stack: "oneTBB for CPU parallelism"). Already an implicit dependency --
+# embree links it and its DLL is copied alongside every render_core binary (DECISIONS.md #0005) --
+# but render_core itself hadn't called find_package/linked it directly until renderEmbree's
+# per-pixel loop needed parallel_for (docs/phase2-rendering.md §4's reference renderer was
+# single-threaded, one CPU core pegged at ~100% while every other core and the GPU sat idle).
+find_package(TBB CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_package(volk CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)

@@ -4,6 +4,8 @@
 #include <numbers>
 
 #include <embree4/rtcore.h>
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 
 #include "manifold/traverse.hpp"
 
@@ -16,6 +18,12 @@
 // exact same per-hop primitive so a light visible only through a chain of portals correctly
 // illuminates and is correctly shadowed (CLAUDE.md antipattern #8: no portal-special-case
 // shortcut in the shadow path).
+//
+// renderEmbree parallelizes across image rows with oneTBB (CLAUDE.md tech stack): every pixel's
+// traceRay call only reads scene/camera and writes its own Image element, no shared mutable
+// state, so rows are independent and the per-pixel result is bit-identical to the sequential
+// version -- this changes wall-clock time only, not any value an acceptance test checks. Embree
+// scenes support concurrent rtcIntersect1 queries from multiple threads by design.
 
 namespace render {
 
@@ -146,12 +154,15 @@ Eigen::Vector3d traceRay(const Scene& scene, Eigen::Vector3d origin, Eigen::Vect
 
 Image renderEmbree(const Scene& scene, const Camera& camera) {
     Image image(camera.imageWidth, camera.imageHeight);
-    for (int y = 0; y < camera.imageHeight; ++y) {
-        for (int x = 0; x < camera.imageWidth; ++x) {
-            Eigen::Vector3d direction = camera.rayDirectionForPixel(static_cast<double>(x), static_cast<double>(y));
-            image.at(x, y) = traceRay(scene, camera.position, direction, /*hopCount=*/0, /*throughput=*/1.0);
+    tbb::parallel_for(tbb::blocked_range<int>(0, camera.imageHeight), [&](const tbb::blocked_range<int>& rows) {
+        for (int y = rows.begin(); y != rows.end(); ++y) {
+            for (int x = 0; x < camera.imageWidth; ++x) {
+                Eigen::Vector3d direction =
+                    camera.rayDirectionForPixel(static_cast<double>(x), static_cast<double>(y));
+                image.at(x, y) = traceRay(scene, camera.position, direction, /*hopCount=*/0, /*throughput=*/1.0);
+            }
         }
-    }
+    });
     return image;
 }
 

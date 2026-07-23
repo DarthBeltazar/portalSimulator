@@ -30,6 +30,21 @@
       }
     },
     {
+      "name": "msvc-release",
+      "inherits": "base",
+      "displayName": "MSVC release (interactive tools -- not a correctness build; CI/merge gating stays on msvc-debug + clang-cl-sanitize)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "cl",
+        "CMAKE_CXX_FLAGS": "/Zc:__cplusplus /W4 /EHsc"
+      },
+      "architecture": { "value": "x64", "strategy": "external" },
+      "environment": {
+        "VCPKG_DEFAULT_TRIPLET": "x64-windows",
+        "VCPKG_VISUAL_STUDIO_PATH": "C:/Program Files/Microsoft Visual Studio/2022/Community"
+      }
+    },
+    {
       "name": "clang-cl-sanitize",
       "inherits": "base",
       "displayName": "clang-cl ASan+UBSan (required merge gate)",
@@ -50,6 +65,7 @@
   ],
   "buildPresets": [
     { "name": "msvc-debug", "configurePreset": "msvc-debug" },
+    { "name": "msvc-release", "configurePreset": "msvc-release" },
     { "name": "clang-cl-sanitize", "configurePreset": "clang-cl-sanitize" }
   ],
   "testPresets": [

@@ -371,3 +371,62 @@ discovery). `msvc-debug` reconfigured and re-tested unaffected: 25/25 (this pres
 
 **Revisit if:** a future MSVC STL version adds another annotated container type and trips the same
 class of mismatch again — same fix, same place.
+
+## 0010 — Interactive real-time viewer, `msvc-release`, and CPU parallelism: tooling built outside the phase plan
+
+**Date:** 2026-07-23
+**Status:** accepted
+
+**Context.** The user asked for a way to *see* Phase 2's rendering work directly (a static demo
+image), then for real-time interactive movement "like in a game," then for higher resolution and
+better performance. `portal-sim-agent-prompt.md` §6 has no deliverable resembling this at any
+phase: Phase 2's acceptance criterion 3 (§5.2/§6) requires a single-image GPU-vs-Embree RMSE
+comparison — not real-time performance, a window, input handling, or per-frame rendering. §7
+("explicitly out of scope for v1") doesn't mention it either; it's simply outside what the plan
+addresses, not something the plan forbids or defers.
+
+**Decision.** Built this as `/tools/` tooling — `portal-sim-agent-prompt.md` §4's "визуализаторы"
+bucket — explicitly *not* as a phase deliverable, and confirmed with the user (per the working
+protocol, §8.2) that it should be logged here as a conscious deviation rather than folded silently
+into Phase 2:
+
+- `tools/interactive_viewer.cpp`: a Win32 + GDI window (WASD + mouse fly camera) that calls
+  `render::renderEmbree` once per frame. Reuses the shared, already-scrutinized demo scene
+  (`tools/demo_scene_common.cpp`) rather than inventing new geometry.
+- `CMakePresets.json`: added `msvc-release` (Release build type). Both existing presets are wrong
+  for judging interactive performance — `msvc-debug` runs at `/Od`, `clang-cl-sanitize` carries
+  instrumentation overhead — but neither is *replaced*: CI/merge gating stays exactly on
+  `msvc-debug` + `clang-cl-sanitize`, unchanged. `msvc-release` is dev-iteration-only, same as
+  `msvc-debug`'s own stated scope.
+- `src/render/renderer.cpp`: parallelized `renderEmbree`'s per-pixel loop across image rows with
+  oneTBB `parallel_for`/`blocked_range` (§3.2's designated CPU-parallelism library — an implicit
+  dependency via Embree already, per decision #0005's context, but not one `render_core` had
+  linked or used directly until now). Made explicit via `vcpkg.json` + root `CMakeLists.txt` +
+  `src/render/CMakeLists.txt` rather than relying on its incidental transitive presence.
+
+**Why this doesn't compromise the phase-gated core.** Every pixel's `traceRay` call only reads
+`scene`/`camera` and writes its own `Image` element — no shared mutable state — so parallelizing
+across rows changes wall-clock time only, not any radiance value an acceptance test checks. Full
+`ctest` after the change: 25/25 pass under `msvc-debug`, including
+`test_shadow_through_portal.cpp` and `test_gpu_vs_embree.cpp` unchanged — bit-identical output,
+not just "still green." Nothing in `/src/manifold`, `/src/physics`, or `/src/fields` was touched.
+
+**Why the Vulkan RT path stays out of the interactive viewer.** `full_scene_gpu.cpp` rebuilds its
+acceleration structure from scratch on every call — fine for Phase 2's one-shot comparison image,
+not for a 60 fps interactive loop — and `VulkanContext` is headless (no swapchain, per its own
+header comment). Making the GPU path real-time-capable (persistent/incrementally-updated TLAS,
+swapchain presentation, per-frame synchronization) is a separate, not-yet-scoped engineering task,
+not something Phase 2 as written (or any later phase) requires.
+
+**Measured.** `msvc-release`, shared demo scene, 400×300 default render resolution: ~40 fps
+(single-threaded) → ~130 fps (parallelized). Full window resolution (960×720, the slowest of the
+viewer's runtime-selectable steps): ~10 fps → ~24 fps. GPU utilization stays ~0% throughout (by
+design — this path never touches `render_vulkan`); CPU utilization now spans multiple cores
+instead of pinning one.
+
+**Revisit if:** a later phase wants to promote this from a debug tool into an actual product
+surface (rather than "look at the render interactively") — at that point decision #0006's
+"Embree is authoritative, GPU is cross-checked against it, never fed back into simulation state"
+architecture and `full_scene_gpu.cpp`'s one-shot acceleration-structure rebuild both need
+reconsidering, and should get their own design doc first per the working protocol, not be
+retrofitted onto this tooling silently.
