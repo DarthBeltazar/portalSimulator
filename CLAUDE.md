@@ -4,11 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-This is a from-scratch, physically-correct portal-space simulator in C++, currently at bootstrap
-stage. `CMakeLists.txt` and `main.cpp` are still CLion's default "Hello World" template — no real
-project code exists yet. There is no `src/`, `tests/`, `vcpkg.json`, `CMakePresets.json`,
-`.clang-format`, or `.clang-tidy`. These must be created following the architecture below before
-feature work begins.
+This is a from-scratch, physically-correct portal-space simulator in C++23. Bootstrap is done —
+`vcpkg.json` (manifest mode) and `CMakePresets.json` (`msvc-debug`, `msvc-release`,
+`clang-cl-sanitize`) exist and are the supported way to configure/build. There is still no
+`.clang-format` or `.clang-tidy`.
+
+Phases 1 (manifold core) and 2 (rendering: Embree CPU reference + Vulkan RT) are complete per the
+acceptance criteria in §"Development phases" below — see `docs/phase1-manifold-core.md` and
+`docs/phase2-rendering.md` for the design docs, `docs/DECISIONS.md` for the full decision log, and
+[`README.md`](README.md) for a build/test/demo quickstart. Phase 3 (point dynamics) has not
+started; `src/physics/`, `src/fields/`, and `src/io/` don't exist yet. Continue strictly in phase
+order per the working protocol below — do not skip ahead to phase 4+ work.
 
 ## Authoritative spec
 
@@ -151,15 +157,15 @@ rather than expanding scope unilaterally.
 - Commits are atomic with substantive messages; a phase merges only with a green CI including the
   sanitizer build.
 
-## Build (current bootstrap state)
-
-No CMakePresets/vcpkg yet, so build with plain CMake + Ninja:
+## Build
 
 ```
-cmake -S . -B cmake-build-debug -G Ninja
-cmake --build cmake-build-debug
-./cmake-build-debug/portalSimulator
+git submodule update --init --recursive   # vcpkg
+cmake --preset msvc-debug
+cmake --build --preset msvc-debug
+ctest --preset msvc-debug
 ```
 
-Once manifest-mode vcpkg and `CMakePresets.json` exist (per §3 above), switch to
-`cmake --preset <name>` / `cmake --build --preset <name>` instead of invoking CMake directly.
+`msvc-debug` and `clang-cl-sanitize` are the two required merge gates (see `CMakePresets.json`);
+`msvc-release` exists only for running the interactive viewers at a usable frame rate and does not
+gate merges. See [`README.md`](README.md) for demo tool invocations.
