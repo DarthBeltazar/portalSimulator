@@ -71,10 +71,6 @@ function(copy_asan_runtime_dll target)
   endif()
 endfunction()
 
-add_executable(portalSimulator main.cpp)
-target_link_libraries(portalSimulator PRIVATE Eigen3::Eigen)
-copy_asan_runtime_dll(portalSimulator)
-
 add_subdirectory(src/manifold)
 add_subdirectory(src/render)
 add_subdirectory(tests/manifold)
