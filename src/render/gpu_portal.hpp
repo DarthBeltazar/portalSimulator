@@ -79,6 +79,18 @@ static_assert(offsetof(HopResult, distanceToHit) == 4);
 static_assert(offsetof(HopResult, newOrigin) == 16);
 static_assert(offsetof(HopResult, newDirection) == 32);
 
+// Mirrors src/render/shaders/portal_traverse.slang's GpuTraversalResult, matched against that
+// shader's own reflection JSON / ArrayStride the same way as the other structs in this file.
+struct TraversalResult {
+    float rotation[4]; // x, y, z, w
+    float translation[3];
+    std::uint32_t hopCount;
+};
+static_assert(sizeof(TraversalResult) == 32);
+static_assert(offsetof(TraversalResult, rotation) == 0);
+static_assert(offsetof(TraversalResult, translation) == 16);
+static_assert(offsetof(TraversalResult, hopCount) == 28);
+
 inline void writeVec3(float (&out)[3], const Eigen::Vector3d& v) {
     out[0] = static_cast<float>(v.x());
     out[1] = static_cast<float>(v.y());

@@ -23,12 +23,16 @@ find_program(SLANGC_EXECUTABLE NAMES slangc REQUIRED)
 # a named custom command, not a hidden step, so `ninja -t targets` shows it.
 function(compile_slang_shader source_file entry_point profile out_var)
   get_filename_component(_name ${source_file} NAME_WE)
+  get_filename_component(_dir ${source_file} DIRECTORY)
   set(_spv "${CMAKE_CURRENT_BINARY_DIR}/${_name}.spv")
   add_custom_command(
     OUTPUT "${_spv}"
-    COMMAND "${SLANGC_EXECUTABLE}" "${source_file}" -profile "${profile}" -target spirv
+    COMMAND "${SLANGC_EXECUTABLE}" "${source_file}" -I "${_dir}" -profile "${profile}" -target spirv
             -entry "${entry_point}" -capability spvRayQueryKHR -o "${_spv}"
-    DEPENDS "${source_file}"
+    # portal_common.slangh isn't a build target of its own, so it wouldn't otherwise trigger a
+    # recompile on edit -- every .slang file in this shader's own directory is a reasonable
+    # over-approximation of its #include graph without parsing it ourselves.
+    DEPENDS "${source_file}" ${ARGN}
     COMMENT "Compiling ${source_file} -> ${_spv} (Slang)"
     VERBATIM
   )

@@ -15,6 +15,7 @@ add_library(render_vulkan STATIC
     vulkan_context.cpp
     vma_impl.cpp
     portal_hop_gpu.cpp
+    portal_traverse_gpu.cpp
 )
 target_include_directories(render_vulkan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(render_vulkan PUBLIC
@@ -26,10 +27,20 @@ target_link_libraries(render_vulkan PUBLIC
     vk-bootstrap::vk-bootstrap
 )
 
-# portal_hop.slang (docs/DECISIONS.md #0007): the differential test's GPU-side port of
+set(PORTAL_SHADER_COMMON ${CMAKE_CURRENT_SOURCE_DIR}/shaders/portal_common.slangh)
+
+# portal_hop.slang (docs/DECISIONS.md #0007): the single-hop differential test's GPU-side port of
 # manifold::stepThroughNearestPortal. sm_6_0 is enough here — this shader is plain arithmetic,
 # no RayQuery<> (that lands with the full scene shader once acceleration structures exist).
-compile_slang_shader(${CMAKE_CURRENT_SOURCE_DIR}/shaders/portal_hop.slang main sm_6_0 PORTAL_HOP_SPV)
+compile_slang_shader(${CMAKE_CURRENT_SOURCE_DIR}/shaders/portal_hop.slang main sm_6_0 PORTAL_HOP_SPV ${PORTAL_SHADER_COMMON})
 add_custom_target(portal_hop_shader DEPENDS ${PORTAL_HOP_SPV})
 add_dependencies(render_vulkan portal_hop_shader)
 target_compile_definitions(render_vulkan PUBLIC PORTAL_HOP_SPV_PATH="${PORTAL_HOP_SPV}")
+
+# portal_traverse.slang: the multi-hop differential test's GPU-side port of
+# manifold::detail::traverseImpl, validating the accumulated-transform composition math that
+# portal_hop.slang alone never exercises (docs/DECISIONS.md #0007's follow-up note).
+compile_slang_shader(${CMAKE_CURRENT_SOURCE_DIR}/shaders/portal_traverse.slang main sm_6_0 PORTAL_TRAVERSE_SPV ${PORTAL_SHADER_COMMON})
+add_custom_target(portal_traverse_shader DEPENDS ${PORTAL_TRAVERSE_SPV})
+add_dependencies(render_vulkan portal_traverse_shader)
+target_compile_definitions(render_vulkan PUBLIC PORTAL_TRAVERSE_SPV_PATH="${PORTAL_TRAVERSE_SPV}")
